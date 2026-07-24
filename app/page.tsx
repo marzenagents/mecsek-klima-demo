@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   computeReportMetrics,
   createMissingFollowups,
@@ -14,6 +14,22 @@ import {
   type Priority,
   type Task,
 } from "./demo-logic";
+import { createPilotDataAdapter, type DataMode, type PilotDataAdapter } from "./data-store";
+import {
+  calculateOfferTotals,
+  calendarEntriesConflict,
+  dashboardHash,
+  overviewCards,
+  parseDashboardHash,
+  type CalendarEntry,
+  type CommunicationLog,
+  type CompanySettings,
+  type DashboardFilter,
+  type DashboardSection,
+  type Offer,
+  type OfferStatus,
+  type PilotState,
+} from "./pilot-model";
 
 const STATUSES: LeadStatus[] = [
   "Új",
@@ -79,6 +95,88 @@ const INITIAL_TASKS: Task[] = [
   { id: "T-7", leadId: "MK-1035", type: "Munkalap előkészítése", due: addDays(3), priority: "Alacsony", done: false },
 ];
 
+const INITIAL_OFFERS: Offer[] = [
+  {
+    id: "AJ-2026-041",
+    leadId: "MK-1039",
+    createdAt: addDays(-8),
+    validUntil: addDays(6),
+    status: "Kiküldött",
+    lines: [
+      { id: "L-1", name: "Klímatisztítás – 3 beltéri egység", kind: "Munkadíj", quantity: 3, unitPrice: 18000 },
+      { id: "L-2", name: "Fertőtlenítő és tisztítóanyag", kind: "Anyag", quantity: 1, unitPrice: 12000 },
+    ],
+    discountPercent: 0,
+    vatPercent: 27,
+    notes: "A munka várható időtartama 2–3 óra.",
+    paymentTerms: "Átutalás vagy készpénz a teljesítést követően.",
+    sentAt: addDays(-5),
+  },
+  {
+    id: "AJ-2026-042",
+    leadId: "MK-1034",
+    createdAt: addDays(-4),
+    validUntil: addDays(10),
+    status: "Kiküldött",
+    lines: [
+      { id: "L-3", name: "Inverteres klímaberendezés", kind: "Anyag", quantity: 2, unitPrice: 285000 },
+      { id: "L-4", name: "Alapszerelés", kind: "Munkadíj", quantity: 2, unitPrice: 85000 },
+    ],
+    discountPercent: 3,
+    vatPercent: 27,
+    notes: "Az ajánlat a helyszíni felmérés után pontosítható.",
+    paymentTerms: "40% előleg, fennmaradó összeg átadáskor.",
+    sentAt: addDays(-2),
+  },
+];
+
+const INITIAL_CALENDAR: CalendarEntry[] = [
+  {
+    id: "CAL-1",
+    leadId: "MK-1040",
+    title: "Visszahívás – Horváth Gábor",
+    type: "Visszahívás",
+    date: today(),
+    time: "09:30",
+    duration: 20,
+    owner: "Bálint",
+    address: "Komló",
+    notes: "A meglévő készülék cseréjének pontosítása.",
+  },
+  {
+    id: "CAL-2",
+    leadId: "MK-1041",
+    title: "Helyszíni felmérés – Nagy Andrea",
+    type: "Helyszíni felmérés",
+    date: addDays(1),
+    time: "14:00",
+    duration: 90,
+    owner: "Dóra",
+    address: "Kozármisleny",
+    notes: "Hőszivattyús korszerűsítés.",
+  },
+];
+
+const DEFAULT_COMPANY: CompanySettings = {
+  name: "Mecsek Klíma",
+  phone: "+36 30 555 1234",
+  email: "info@mecsekklima-demo.hu",
+  serviceArea: "Pécs és 60 kilométeres körzete",
+  primaryColor: "#087a73",
+  services: SERVICES,
+  team: ["Bálint", "Dóra"],
+  paymentTerms: "40% előleg, fennmaradó összeg a munka átadásakor.",
+  offerValidityDays: 14,
+  retentionDays: 365,
+  templates: {
+    leadConfirmation: "Köszönjük a megkeresést. Egy munkanapon belül jelentkezünk a következő lépéssel.",
+    ownerNotification: "Új érdeklődő érkezett: [Név] – [Szolgáltatás].",
+    offerEmail: "Csatolva küldjük a [Szolgáltatás] kapcsán készített előzetes ajánlatot.",
+    followupEmail: "Sikerült átnéznie az ajánlatunkat? Szívesen segítünk a felmerült kérdésekben.",
+    appointmentReminder: "Emlékeztető: [Dátum] [Időpont] időpontra egyeztettünk.",
+  },
+};
+
 const DEFAULT_FORM = {
   service: "", city: "", zip: "", property: "", area: "", rooms: "", ownership: "",
   units: "", mode: "", existing: "", pipe: "", outdoor: "", heating: "", emitter: "",
@@ -139,12 +237,20 @@ function money(value: number) {
 export default function Home() {
   const [mode, setMode] = useState<"public" | "dashboard">("public");
   const [publicView, setPublicView] = useState<"home" | "form" | "success">("home");
-  const [section, setSection] = useState("Áttekintés");
+  const [section, setSection] = useState<DashboardSection>("Áttekintés");
+  const [dashboardFilter, setDashboardFilter] = useState<DashboardFilter>(null);
   const [step, setStep] = useState(1);
   const [form, setForm] = useState(DEFAULT_FORM);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [leads, setLeads] = useState<Lead[]>(() => INITIAL_LEADS.map(migrateLead));
   const [tasks, setTasks] = useState<Task[]>(() => INITIAL_TASKS.map(migrateTask));
+  const [offers, setOffers] = useState<Offer[]>(INITIAL_OFFERS);
+  const [calendar, setCalendar] = useState<CalendarEntry[]>(INITIAL_CALENDAR);
+  const [company, setCompany] = useState<CompanySettings>(DEFAULT_COMPANY);
+  const [communications, setCommunications] = useState<CommunicationLog[]>([]);
+  const [adapter] = useState<PilotDataAdapter>(() => createPilotDataAdapter());
+  const [dataMode] = useState<DataMode>(() => adapter.mode);
+  const [demoRole, setDemoRole] = useState<"Tulajdonos" | "Munkatárs">("Tulajdonos");
   const [selected, setSelected] = useState<Lead | null>(null);
   const [lastLead, setLastLead] = useState<Lead | null>(null);
   const [query, setQuery] = useState("");
@@ -158,40 +264,95 @@ export default function Home() {
   const [callbackForm, setCallbackForm] = useState(DEFAULT_CALLBACK);
   const [callbackErrors, setCallbackErrors] = useState<Record<string, string>>({});
   const [callbackLead, setCallbackLead] = useState<Lead | null>(null);
+  const [messagePreview, setMessagePreview] = useState<CommunicationLog | null>(null);
   const [tour, setTour] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const callbackTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      try {
-        const savedLeads = localStorage.getItem("mecsek-leads");
-        const savedTasks = localStorage.getItem("mecsek-tasks");
-        if (savedLeads) setLeads((JSON.parse(savedLeads) as Lead[]).map(migrateLead));
-        if (savedTasks) setTasks((JSON.parse(savedTasks) as Task[]).map(migrateTask));
-      } catch {
-        setToast("A mentett demóadatokat nem sikerült betölteni.");
-      }
-      setLoaded(true);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
+    let active = true;
+    const defaults: PilotState = {
+      leads: INITIAL_LEADS.map(migrateLead),
+      tasks: INITIAL_TASKS.map(migrateTask),
+      offers: INITIAL_OFFERS,
+      calendar: INITIAL_CALENDAR,
+      company: DEFAULT_COMPANY,
+      communications: [],
+    };
+    void adapter.load(defaults)
+      .then((state) => {
+        if (!active) return;
+        setLeads(state.leads.map(migrateLead));
+        setTasks(state.tasks.map(migrateTask));
+        setOffers(state.offers);
+        setCalendar(state.calendar);
+        setCompany(state.company);
+        setCommunications(state.communications);
+      })
+      .catch(() => {
+        if (active) setToast("A mentett pilotadatokat nem sikerült betölteni, ezért a demóadatok jelennek meg.");
+      })
+      .finally(() => {
+        if (active) setLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [adapter]);
 
   useEffect(() => {
     if (!loaded) return;
-    try {
-      localStorage.setItem("mecsek-leads", JSON.stringify(leads));
-      localStorage.setItem("mecsek-tasks", JSON.stringify(tasks));
-      localStorage.setItem("mecsek-data-version", "2");
-    } catch {
-      window.setTimeout(() => setToast("A helyi mentés nem sikerült. Ellenőrizd a böngésző tárhelyét."), 0);
-    }
-  }, [leads, tasks, loaded]);
+    const timer = window.setTimeout(() => {
+      const state: PilotState = { leads, tasks, offers, calendar, company, communications };
+      void adapter.save(state).catch(() => {
+        setToast("A pilotadatok mentése nem sikerült. Ellenőrizd az adatkapcsolatot.");
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [leads, tasks, offers, calendar, company, communications, loaded, adapter]);
 
   const showToast = (message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
   };
+
+  const applyDashboardFilter = useCallback((filter: DashboardFilter) => {
+    setDashboardFilter(filter);
+    setQuery("");
+    setServiceFilter("");
+    setCityFilter("");
+    setStatusFilter(filter?.scope === "lead" ? filter.value : "");
+  }, []);
+
+  const navigateDashboard = useCallback((
+    target: DashboardSection,
+    filter: DashboardFilter = null,
+    replace = false,
+  ) => {
+    setMode("dashboard");
+    setSection(target);
+    applyDashboardFilter(filter);
+    const hash = dashboardHash(target, filter);
+    if (replace) window.history.replaceState({ target, filter }, "", hash);
+    else window.history.pushState({ target, filter }, "", hash);
+  }, [applyDashboardFilter]);
+
+  useEffect(() => {
+    const syncFromHistory = () => {
+      const parsed = parseDashboardHash(window.location.hash);
+      if (!parsed) return;
+      setMode("dashboard");
+      setSection(parsed.section);
+      applyDashboardFilter(parsed.filter);
+    };
+    syncFromHistory();
+    window.addEventListener("popstate", syncFromHistory);
+    window.addEventListener("hashchange", syncFromHistory);
+    return () => {
+      window.removeEventListener("popstate", syncFromHistory);
+      window.removeEventListener("hashchange", syncFromHistory);
+    };
+  }, [applyDashboardFilter]);
 
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -258,6 +419,27 @@ export default function Home() {
     };
     setLeads((prev) => [lead, ...prev]);
     setTasks((prev) => [{ id: `T-${Date.now()}`, leadId: id, type: "Visszahívás", due: addDays(1), priority: lead.priority, owner: "Bálint", done: false }, ...prev]);
+    setCommunications((prev) => [
+      {
+        id: `MSG-${Date.now()}-customer`,
+        leadId: id,
+        kind: "Visszaigazolás",
+        subject: "Megkaptuk ajánlatkérését – Mecsek Klíma",
+        body: `Kedves ${lead.name}!\n\n${company.templates.leadConfirmation}\n\nAz érdeklődés azonosítója: ${id}\n\nEz a demó nem küldött valódi e-mailt.`,
+        createdAt: new Date().toISOString(),
+        mode: "Demó előnézet",
+      },
+      {
+        id: `MSG-${Date.now()}-owner`,
+        leadId: id,
+        kind: "Új érdeklődő",
+        subject: `Új érdeklődő: ${lead.name}`,
+        body: company.templates.ownerNotification.replace("[Név]", lead.name).replace("[Szolgáltatás]", lead.service),
+        createdAt: new Date().toISOString(),
+        mode: "Demó előnézet",
+      },
+      ...prev,
+    ]);
     setLastLead(lead);
     setForm(DEFAULT_FORM);
     setFormErrors({});
@@ -326,6 +508,15 @@ export default function Home() {
     };
     setLeads((prev) => [lead, ...prev]);
     setTasks((prev) => [task, ...prev]);
+    setCommunications((prev) => [{
+      id: `MSG-${Date.now()}-callback`,
+      leadId: id,
+      kind: "Új érdeklődő",
+      subject: `Új visszahívási igény: ${lead.name}`,
+      body: company.templates.ownerNotification.replace("[Név]", lead.name).replace("[Szolgáltatás]", lead.service),
+      createdAt: new Date().toISOString(),
+      mode: "Demó előnézet",
+    }, ...prev]);
     setCallbackLead(lead);
     setCallbackErrors({});
     showToast(`A visszahívási igény rögzítve: ${id}`);
@@ -424,14 +615,148 @@ export default function Home() {
     showToast("A jegyzet elmentve.");
   };
 
+  const addQuickNote = (leadId: string, text: string) => {
+    if (!text.trim()) return;
+    updateLead(leadId, (lead) => ({
+      ...lead,
+      notes: [text.trim(), ...lead.notes],
+      timeline: [`${today()} • Mobil munkanap-jegyzet hozzáadva`, ...lead.timeline],
+    }));
+    showToast("A gyors jegyzet elmentve.");
+  };
+
+  const saveOffer = (offer: Offer) => {
+    const totals = calculateOfferTotals(offer);
+    setOffers((previous) => {
+      const exists = previous.some((item) => item.id === offer.id);
+      return exists
+        ? previous.map((item) => item.id === offer.id ? offer : item)
+        : [offer, ...previous];
+    });
+    updateLead(offer.leadId, (lead) => ({
+      ...lead,
+      value: totals.gross,
+      status: lead.status === "Új" ? "Ajánlat készül" : lead.status,
+      nextAction: "Ajánlat véglegesítése",
+      timeline: [`${today()} • Ajánlat mentve: ${offer.id}`, ...lead.timeline],
+    }));
+    showToast("Az ajánlat elmentve.");
+  };
+
+  const changeOfferStatus = (offer: Offer, status: OfferStatus) => {
+    const sentAt = status === "Kiküldött" ? offer.sentAt ?? today() : offer.sentAt;
+    const updated = { ...offer, status, sentAt };
+    setOffers((previous) => previous.some((item) => item.id === offer.id)
+      ? previous.map((item) => item.id === offer.id ? updated : item)
+      : [updated, ...previous]);
+    const linkedLead = leads.find((lead) => lead.id === offer.leadId);
+    if (linkedLead) {
+      const mappedStatus: LeadStatus | null =
+        status === "Kiküldött" ? "Ajánlat elküldve"
+          : status === "Elfogadott" ? "Megnyert"
+            : status === "Elutasított" ? "Elvesztett"
+              : null;
+      if (mappedStatus) {
+        updateLead(linkedLead.id, (lead) => ({
+          ...lead,
+          status: mappedStatus,
+          offerSentAt: status === "Kiküldött" ? sentAt : lead.offerSentAt,
+          lastContactAt: today(),
+          nextAction: status === "Kiküldött" ? "Ajánlat utáni érdeklődés" : status === "Elfogadott" ? "Kivitelezés egyeztetése" : "Lezárva",
+          nextDate: status === "Kiküldött" ? addDays(3) : lead.nextDate,
+          timeline: [`${today()} • ${offer.id} állapota: ${status}`, ...lead.timeline],
+        }));
+      }
+      if (status === "Kiküldött") {
+        setTasks((previous) => {
+          const generated = createMissingFollowups(previous, linkedLead.id, sentAt ?? today());
+          return generated.length ? [...generated, ...previous] : previous;
+        });
+        const totals = calculateOfferTotals(updated);
+        const message: CommunicationLog = {
+          id: `MSG-${Date.now()}-offer`,
+          leadId: linkedLead.id,
+          kind: "Ajánlat",
+          subject: `${offer.id} – ${linkedLead.service}`,
+          body: `Kedves ${linkedLead.name}!\n\n${company.templates.offerEmail.replace("[Szolgáltatás]", linkedLead.service)}\n\nAjánlat bruttó összege: ${money(totals.gross)}\nÉrvényes: ${offer.validUntil}\n\nEz egy demó e-mail-előnézet, valódi küldés nem történt.`,
+          createdAt: new Date().toISOString(),
+          mode: "Demó előnézet",
+        };
+        setCommunications((previous) => [message, ...previous]);
+        setMessagePreview(message);
+        showToast("Az ajánlat kiküldése szimulálva, az utánkövetések létrejöttek.");
+      } else {
+        showToast(`Az ajánlat új állapota: ${status}.`);
+      }
+    }
+  };
+
+  const duplicateOffer = (offer: Offer) => {
+    const copy: Offer = {
+      ...offer,
+      id: `AJ-${new Date().getFullYear()}-${String(offers.length + 43).padStart(3, "0")}`,
+      createdAt: today(),
+      validUntil: addDays(company.offerValidityDays),
+      status: "Piszkozat",
+      sentAt: undefined,
+      lines: offer.lines.map((line, index) => ({ ...line, id: `L-${Date.now()}-${index}` })),
+    };
+    setOffers((previous) => [copy, ...previous]);
+    showToast(`Az ajánlat másolata elkészült: ${copy.id}`);
+  };
+
+  const saveCalendarEntry = (entry: CalendarEntry) => {
+    if (calendarEntriesConflict(entry, calendar)) {
+      showToast("A kiválasztott munkatársnak ebben az időben már van programja.");
+      return false;
+    }
+    setCalendar((previous) => previous.some((item) => item.id === entry.id)
+      ? previous.map((item) => item.id === entry.id ? entry : item)
+      : [entry, ...previous]);
+    updateLead(entry.leadId, (lead) => ({
+      ...lead,
+      nextAction: entry.type,
+      nextDate: entry.date,
+      timeline: [`${today()} • Naptárbejegyzés: ${entry.type} (${entry.date} ${entry.time})`, ...lead.timeline],
+    }));
+    showToast("Az időpont bekerült a naptárba.");
+    return true;
+  };
+
+  const exportPilotData = () => {
+    const payload: PilotState = { leads, tasks, offers, calendar, company, communications };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `mecsek-klima-demo-export-${today()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast("A demóadatok exportja elkészült.");
+  };
+
+  const deleteLead = (lead: Lead) => {
+    if (!window.confirm(`Biztosan törlöd ezt a fiktív ügyfelet: ${lead.name}?`)) return;
+    setLeads((previous) => previous.filter((item) => item.id !== lead.id));
+    setTasks((previous) => previous.filter((item) => item.leadId !== lead.id));
+    setOffers((previous) => previous.filter((item) => item.leadId !== lead.id));
+    setCalendar((previous) => previous.filter((item) => item.leadId !== lead.id));
+    setCommunications((previous) => previous.filter((item) => item.leadId !== lead.id));
+    setSelected(null);
+    showToast("A fiktív ügyfélhez tartozó adatok törölve.");
+  };
+
   const resetDemo = () => {
     if (!window.confirm("Biztosan visszaállítod az eredeti fiktív demóadatokat?")) return;
     setLeads(INITIAL_LEADS.map(migrateLead));
     setTasks(INITIAL_TASKS.map(migrateTask));
+    setOffers(INITIAL_OFFERS);
+    setCalendar(INITIAL_CALENDAR);
+    setCompany(DEFAULT_COMPANY);
+    setCommunications([]);
     setSelected(null);
-    localStorage.removeItem("mecsek-leads");
-    localStorage.removeItem("mecsek-tasks");
-    localStorage.removeItem("mecsek-data-version");
+    setDashboardFilter(null);
+    void adapter.clear();
     setCallbackLead(null);
     setCallbackForm(DEFAULT_CALLBACK);
     setForm(DEFAULT_FORM);
@@ -501,7 +826,7 @@ export default function Home() {
             <nav>
               <a href="#szolgaltatasok">Szolgáltatások</a>
               <a href="#folyamat">Hogyan működik?</a>
-              <button className="nav-dashboard" onClick={() => setMode("dashboard")}>Demó kezelőfelület</button>
+              <button className="nav-dashboard" onClick={() => navigateDashboard("Áttekintés")}>Demó kezelőfelület</button>
             </nav>
           </header>
           {publicView === "home" && <PublicHome
@@ -513,22 +838,29 @@ export default function Home() {
             <QuoteForm form={form} updateForm={updateForm} errors={formErrors} step={step} setStep={setStep} nextStep={nextStep} heatPump={heatPump} onCancel={() => setPublicView("home")} />
           )}
           {publicView === "success" && lastLead && (
-            <Success lead={lastLead} onBooking={() => setBooking(true)} onDashboard={() => { setMode("dashboard"); setSection("Érdeklődők"); }} />
+            <Success lead={lastLead} onBooking={() => setBooking(true)} onDashboard={() => { navigateDashboard("Érdeklődők"); setSelected(lastLead); }} />
           )}
         </>
       ) : (
         <Dashboard
-          section={section} setSection={setSection} setMode={setMode} leads={leads} tasks={tasks}
+          section={section} navigate={navigateDashboard} setMode={setMode} leads={leads} tasks={tasks}
           setTasks={setTasks} filteredLeads={filteredLeads} query={query} setQuery={setQuery}
           statusFilter={statusFilter} setStatusFilter={setStatusFilter} serviceFilter={serviceFilter}
           setServiceFilter={setServiceFilter} cityFilter={cityFilter} setCityFilter={setCityFilter}
           setSelected={setSelected} resetDemo={resetDemo} completeTask={completeTask} postponeTask={postponeTask}
+          dashboardFilter={dashboardFilter} clearDashboardFilter={() => navigateDashboard(section)}
+          offers={offers} saveOffer={saveOffer} changeOfferStatus={changeOfferStatus} duplicateOffer={duplicateOffer}
+          calendar={calendar} saveCalendarEntry={saveCalendarEntry} company={company} setCompany={setCompany}
+          communications={communications} setMessagePreview={setMessagePreview} dataMode={dataMode}
+          exportPilotData={exportPilotData} showToast={showToast} addQuickNote={addQuickNote}
+          demoRole={demoRole} setDemoRole={setDemoRole}
         />
       )}
       {selected && (
         <LeadDrawer lead={selected} close={() => setSelected(null)} changeStatus={changeStatus}
           setLossReason={setLossReason} createTask={createTask}
-          note={note} setNote={setNote} addNote={addNote} tasks={tasks.filter((task) => task.leadId === selected.id && !task.done)} />
+          note={note} setNote={setNote} addNote={addNote} deleteLead={deleteLead}
+          tasks={tasks.filter((task) => task.leadId === selected.id && !task.done)} />
       )}
       {booking && <Booking close={() => setBooking(false)} confirm={() => { setBooking(false); showToast("A demó időpontfoglalás rögzítve."); }} />}
       {callbackOpen && <CallbackModal
@@ -541,11 +873,13 @@ export default function Home() {
         submit={() => submitCallback(false)}
         openDashboard={() => {
           setCallbackOpen(false);
-          setMode("dashboard");
-          setSection("Érdeklődők");
+          navigateDashboard("Érdeklődők");
           if (callbackLead) setSelected(callbackLead);
         }}
       />}
+      {messagePreview && (
+        <MessagePreview message={messagePreview} close={() => setMessagePreview(null)} />
+      )}
       {tour > 0 && (
         <div className="tour-card" role="dialog" aria-modal="false" aria-live="polite" aria-label="Vezetett demóbemutató">
           <span>{tour}/8</span>
@@ -742,106 +1076,391 @@ function Success({ lead, onBooking, onDashboard }: { lead: Lead; onBooking: () =
   );
 }
 
-function Dashboard(props: {
-  section: string; setSection: (s: string) => void; setMode: (m: "public" | "dashboard") => void;
-  leads: Lead[]; tasks: Task[]; setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
-  filteredLeads: Lead[]; query: string; setQuery: (s: string) => void; statusFilter: string;
-  setStatusFilter: (s: string) => void; serviceFilter: string; setServiceFilter: (s: string) => void;
-  cityFilter: string; setCityFilter: (s: string) => void; setSelected: (lead: Lead) => void; resetDemo: () => void;
-  completeTask: (id: string) => void; postponeTask: (id: string) => void;
-}) {
-  const { section, setSection, setMode, leads, tasks, setSelected } = props;
+type DashboardProps = {
+  section: DashboardSection;
+  navigate: (section: DashboardSection, filter?: DashboardFilter) => void;
+  setMode: (mode: "public" | "dashboard") => void;
+  leads: Lead[];
+  tasks: Task[];
+  setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
+  filteredLeads: Lead[];
+  query: string;
+  setQuery: (value: string) => void;
+  statusFilter: string;
+  setStatusFilter: (value: string) => void;
+  serviceFilter: string;
+  setServiceFilter: (value: string) => void;
+  cityFilter: string;
+  setCityFilter: (value: string) => void;
+  setSelected: (lead: Lead) => void;
+  resetDemo: () => void;
+  completeTask: (id: string) => void;
+  postponeTask: (id: string) => void;
+  dashboardFilter: DashboardFilter;
+  clearDashboardFilter: () => void;
+  offers: Offer[];
+  saveOffer: (offer: Offer) => void;
+  changeOfferStatus: (offer: Offer, status: OfferStatus) => void;
+  duplicateOffer: (offer: Offer) => void;
+  calendar: CalendarEntry[];
+  saveCalendarEntry: (entry: CalendarEntry) => boolean;
+  company: CompanySettings;
+  setCompany: React.Dispatch<React.SetStateAction<CompanySettings>>;
+  communications: CommunicationLog[];
+  setMessagePreview: (message: CommunicationLog) => void;
+  dataMode: DataMode;
+  exportPilotData: () => void;
+  showToast: (message: string) => void;
+  addQuickNote: (leadId: string, text: string) => void;
+  demoRole: "Tulajdonos" | "Munkatárs";
+  setDemoRole: (role: "Tulajdonos" | "Munkatárs") => void;
+};
+
+function Dashboard(props: DashboardProps) {
+  const { section, navigate, setMode, leads, tasks, setSelected } = props;
   const activeTasks = tasks.filter((task) => !task.done);
-  const nav = [["Áttekintés", "⌂"], ["Érdeklődők", "◎"], ["Mai feladatok", "□"], ["Ajánlatok", "₣"], ["Kimutatások", "↗"], ["Beállítások", "⚙"]];
+  const allNav: [DashboardSection, string][] = [
+    ["Áttekintés", "⌂"],
+    ["Érdeklődők", "◎"],
+    ["Mai feladatok", "□"],
+    ["Ajánlatok", "₣"],
+    ["Naptár", "▦"],
+    ["Munkanap", "☀"],
+    ["Kimutatások", "↗"],
+    ["Beállítások", "⚙"],
+  ];
+  const nav = props.demoRole === "Tulajdonos" ? allNav : allNav.filter(([name]) => name !== "Beállítások");
   return (
     <div className="dashboard-shell">
       <aside className="sidebar">
-        <div className="brand dark"><span className="brand-mark">M</span><span><strong>Mecsek Klíma</strong><small>Demó kezelőfelület</small></span></div>
-        <nav>{nav.map(([name, icon]) => <button className={section === name ? "active" : ""} key={name} onClick={() => setSection(name)}><span>{icon}</span>{name}{name === "Mai feladatok" && <i>{activeTasks.length}</i>}</button>)}</nav>
-        <div className="sidebar-bottom"><button onClick={() => setMode("public")}>↗ Nyilvános oldal</button><small>Fiktív demóadatok</small></div>
+        <div className="brand dark"><span className="brand-mark">M</span><span><strong>{props.company.name}</strong><small>Demó kezelőfelület</small></span></div>
+        <nav>{nav.map(([name, icon]) => (
+          <button className={section === name ? "active" : ""} key={name} onClick={() => navigate(name)}>
+            <span>{icon}</span>{name}{name === "Mai feladatok" && <i>{activeTasks.length}</i>}
+          </button>
+        ))}</nav>
+        <div className="sidebar-bottom"><button onClick={() => setMode("public")}>↗ Nyilvános oldal</button><small>{props.dataMode} • fiktív adatok</small></div>
       </aside>
       <div className="dashboard-main">
-        <header className="dashboard-header"><div><span className="mobile-demo">Demó kezelőfelület</span><h1>{section}</h1><p>{section === "Áttekintés" ? "A mai nap legfontosabb ügyfélfolyamatai egy helyen." : "Minden megjelenített adat fiktív."}</p></div><div className="user-chip"><span>BM</span><div><strong>Bálint Márk</strong><small>Tulajdonos</small></div></div></header>
-        {section === "Áttekintés" && <Overview leads={leads} tasks={activeTasks} openLead={setSelected} go={setSection} />}
+        <header className="dashboard-header"><div><span className="mobile-demo">Demó kezelőfelület</span><h1>{section}</h1><p>{section === "Áttekintés" ? "A mai nap legfontosabb ügyfélfolyamatai egy helyen." : "Minden megjelenített adat fiktív."}</p></div><div className="user-chip role-switch"><span>{props.demoRole === "Tulajdonos" ? "BM" : "DN"}</span><div><strong>{props.demoRole === "Tulajdonos" ? "Bálint Márk" : "Dóra Nagy"}</strong><select aria-label="Demó szerepkör" value={props.demoRole} onChange={(event) => { const role = event.target.value as "Tulajdonos" | "Munkatárs"; props.setDemoRole(role); if (role === "Munkatárs" && section === "Beállítások") navigate("Áttekintés"); }}><option>Tulajdonos</option><option>Munkatárs</option></select></div></div></header>
+        {section === "Áttekintés" && <Overview leads={leads} tasks={activeTasks} openLead={setSelected} navigate={navigate} />}
         {section === "Érdeklődők" && <LeadList {...props} />}
-        {section === "Mai feladatok" && <TaskList tasks={tasks} leads={leads} completeTask={props.completeTask} postponeTask={props.postponeTask} openLead={setSelected} />}
-        {section === "Ajánlatok" && <Offers leads={leads} openLead={setSelected} />}
-        {section === "Kimutatások" && <Reports leads={leads} tasks={tasks} />}
-        {section === "Beállítások" && <Settings resetDemo={props.resetDemo} />}
+        {section === "Mai feladatok" && <TaskList tasks={tasks} leads={leads} filter={props.dashboardFilter} clearFilter={props.clearDashboardFilter} completeTask={props.completeTask} postponeTask={props.postponeTask} openLead={setSelected} />}
+        {section === "Ajánlatok" && <Offers leads={leads} offers={props.offers} filter={props.dashboardFilter} clearFilter={props.clearDashboardFilter} openLead={setSelected} saveOffer={props.saveOffer} changeOfferStatus={props.changeOfferStatus} duplicateOffer={props.duplicateOffer} company={props.company} />}
+        {section === "Naptár" && <CalendarView leads={leads} entries={props.calendar} company={props.company} saveEntry={props.saveCalendarEntry} openLead={setSelected} />}
+        {section === "Munkanap" && <WorkdayView leads={leads} tasks={tasks} completeTask={props.completeTask} postponeTask={props.postponeTask} openLead={setSelected} showToast={props.showToast} addQuickNote={props.addQuickNote} />}
+        {section === "Kimutatások" && <Reports leads={leads} tasks={tasks} offers={props.offers} />}
+        {section === "Beállítások" && <Settings resetDemo={props.resetDemo} company={props.company} setCompany={props.setCompany} communications={props.communications} setMessagePreview={props.setMessagePreview} dataMode={props.dataMode} exportPilotData={props.exportPilotData} />}
       </div>
     </div>
   );
 }
 
-function Overview({ leads, tasks, openLead, go }: { leads: Lead[]; tasks: Task[]; openLead: (lead: Lead) => void; go: (s: string) => void }) {
-  const metrics = [
-    ["Új érdeklődők", leads.filter((l) => l.status === "Új").length, "↗"],
-    ["Ma visszahívandók", tasks.filter((t) => t.due === today() && t.type.includes("Visszahívás")).length, "☎"],
-    ["Felmérésre várók", leads.filter((l) => l.status === "Felmérés egyeztetve").length, "⌂"],
-    ["Kiküldött ajánlatok", leads.filter((l) => l.status === "Ajánlat elküldve").length, "₣"],
-    ["Utánkövetésre várók", leads.filter((l) => l.status === "Utánkövetés szükséges").length, "↻"],
-    ["Megnyert munkák", leads.filter((l) => l.status === "Megnyert").length, "✓"],
-    ["Lejárt feladatok", tasks.filter((t) => t.due < today()).length, "!"],
-  ];
+function ActiveFilter({ filter, clear }: { filter: DashboardFilter; clear: () => void }) {
+  if (!filter) return null;
+  return <div className="active-filter" role="status"><span>Aktív szűrés: <strong>{filter.label}</strong></span><button onClick={clear}>Szűrés törlése ×</button></div>;
+}
+
+function Overview({ leads, tasks, openLead, navigate }: {
+  leads: Lead[];
+  tasks: Task[];
+  openLead: (lead: Lead) => void;
+  navigate: (section: DashboardSection, filter?: DashboardFilter) => void;
+}) {
+  const cards = overviewCards(leads, tasks, today());
   return <div className="dashboard-content">
-    <div className="metric-grid">{metrics.map(([label, value, icon]) => <article key={label as string}><div><span>{icon}</span><small>{label}</small></div><strong>{value}</strong></article>)}</div>
+    <div className="overview-groups" aria-label="Kiemelt ügyfélfolyamatok">
+      {["Beérkező munkák", "Aktív értékesítés", "Eredmények", "Figyelmeztetések"].map((group) => (
+        <section className={`metric-group group-${group.toLowerCase().replaceAll(" ", "-")}`} key={group}>
+          <h2>{group}</h2>
+          <div className="metric-grid">{cards.filter((card) => card.group === group).map((card) => (
+            <button
+              className="metric-card"
+              key={card.label}
+              onClick={() => navigate(card.section, card.filter)}
+              aria-label={`${card.label}: ${card.value}. Szűrt lista megnyitása`}
+            >
+              <div><span>{card.icon}</span><small>{card.label}</small></div>
+              <strong>{card.value}</strong>
+              <p>{card.description}</p>
+              <b>Részletek →</b>
+            </button>
+          ))}</div>
+        </section>
+      ))}
+    </div>
     <div className="dashboard-columns">
-      <section className="panel"><div className="panel-title"><div><h2>Legfrissebb érdeklődők</h2><p>Az utolsó beérkezett megkeresések</p></div><button onClick={() => go("Érdeklődők")}>Összes megnyitása →</button></div>
-        <div className="compact-list">{leads.slice(0, 6).map((lead) => <button key={lead.id} onClick={() => openLead(lead)}><span className="avatar">{lead.name.split(" ").map((x) => x[0]).join("")}</span><span><strong>{lead.name}</strong><small>{lead.city} • {lead.service}</small></span><Status status={lead.status} /><b>›</b></button>)}</div>
+      <section className="panel"><div className="panel-title"><div><h2>Legfrissebb érdeklődők</h2><p>Az utolsó beérkezett megkeresések</p></div><button onClick={() => navigate("Érdeklődők")}>Összes megnyitása →</button></div>
+        <div className="compact-list">{leads.slice(0, 6).map((lead) => <button key={lead.id} onClick={() => openLead(lead)}><span className="avatar">{lead.name.split(" ").map((part) => part[0]).join("")}</span><span><strong>{lead.name}</strong><small>{lead.city} • {lead.service}</small></span><Status status={lead.status} /><b>›</b></button>)}</div>
       </section>
-      <section className="panel today-panel"><div className="panel-title"><div><h2>Mai teendők</h2><p>Ne maradjon el egy következő lépés sem</p></div><button onClick={() => go("Mai feladatok")}>Lista →</button></div>
-        {tasks.slice(0, 5).map((task) => { const lead = leads.find((l) => l.id === task.leadId)!; return <button className="mini-task" key={task.id} onClick={() => lead && openLead(lead)}><i className={`priority ${task.priority.toLowerCase()}`} /><span><strong>{task.type}</strong><small>{lead?.name} • {lead?.city}</small></span><time>{task.due === today() ? "Ma" : task.due}</time></button>; })}
+      <section className="panel today-panel"><div className="panel-title"><div><h2>Mai teendők</h2><p>Ne maradjon el egy következő lépés sem</p></div><button onClick={() => navigate("Mai feladatok")}>Lista →</button></div>
+        {tasks.slice(0, 5).map((task) => { const lead = leads.find((item) => item.id === task.leadId); return <button className="mini-task" key={task.id} onClick={() => lead && openLead(lead)}><i className={`priority ${task.priority.toLowerCase()}`} /><span><strong>{task.type}</strong><small>{lead?.name} • {lead?.city}</small></span><time>{task.due === today() ? "Ma" : task.due}</time></button>; })}
       </section>
     </div>
-    <div className="pipeline"><div className="panel-title"><div><h2>Értékesítési folyamat</h2><p>Az aktuális érdeklődők státusz szerint</p></div><small>A megjelenített számok fiktív demóadatok.</small></div><div className="pipeline-row">{[["Új érdeklődő", ["Új", "Visszahívandó"]], ["Kapcsolatfelvétel", ["Kapcsolatfelvétel megtörtént"]], ["Felmérés", ["Felmérés egyeztetve"]], ["Ajánlat", ["Ajánlat készül", "Ajánlat elküldve", "Utánkövetés szükséges"]], ["Megnyert munka", ["Megnyert"]]].map(([name, statuses], index) => <div key={name as string}><span>{index + 1}</span><strong>{leads.filter((l) => (statuses as string[]).includes(l.status)).length}</strong><small>{name as string}</small></div>)}</div></div>
+    <div className="pipeline"><div className="panel-title"><div><h2>Értékesítési folyamat</h2><p>Az aktuális érdeklődők státusz szerint</p></div><small>A megjelenített számok fiktív demóadatok.</small></div><div className="pipeline-row">{[["Új érdeklődő", ["Új", "Visszahívandó"]], ["Kapcsolatfelvétel", ["Kapcsolatfelvétel megtörtént"]], ["Felmérés", ["Felmérés egyeztetve"]], ["Ajánlat", ["Ajánlat készül", "Ajánlat elküldve", "Utánkövetés szükséges"]], ["Megnyert munka", ["Megnyert"]]].map(([name, statuses], index) => <div key={name as string}><span>{index + 1}</span><strong>{leads.filter((lead) => (statuses as string[]).includes(lead.status)).length}</strong><small>{name as string}</small></div>)}</div></div>
   </div>;
 }
 
-function LeadList(props: {
-  filteredLeads: Lead[]; query: string; setQuery: (s: string) => void; statusFilter: string;
-  setStatusFilter: (s: string) => void; serviceFilter: string; setServiceFilter: (s: string) => void;
-  cityFilter: string; setCityFilter: (s: string) => void; setSelected: (lead: Lead) => void; leads: Lead[];
-}) {
+function LeadList(props: DashboardProps) {
   const cities = Array.from(new Set(props.leads.map((lead) => lead.city))).sort();
-  return <div className="dashboard-content"><div className="filters"><input aria-label="Keresés" value={props.query} onChange={(e) => props.setQuery(e.target.value)} placeholder="Keresés név, telefon vagy azonosító alapján…" /><select aria-label="Státusz" value={props.statusFilter} onChange={(e) => props.setStatusFilter(e.target.value)}><option value="">Minden státusz</option>{STATUSES.map((s) => <option key={s}>{s}</option>)}</select><select aria-label="Szolgáltatás" value={props.serviceFilter} onChange={(e) => props.setServiceFilter(e.target.value)}><option value="">Minden szolgáltatás</option>{SERVICES.map((s) => <option key={s}>{s}</option>)}</select><select aria-label="Település" value={props.cityFilter} onChange={(e) => props.setCityFilter(e.target.value)}><option value="">Minden település</option>{cities.map((s) => <option key={s}>{s}</option>)}</select></div>
-    <div className="lead-table"><div className="table-head"><span>Érdeklődő</span><span>Szolgáltatás</span><span>Státusz</span><span>Prioritás</span><span>Következő lépés</span><span></span></div>{props.filteredLeads.length ? props.filteredLeads.map((lead) => <button className="table-row" key={lead.id} onClick={() => props.setSelected(lead)}><span><b>{lead.name}</b><small>{lead.id} • {lead.city}</small></span><span>{lead.service}</span><span><Status status={lead.status} /></span><span><i className={`priority ${lead.priority.toLowerCase()}`} />{lead.priority}</span><span><b>{lead.nextAction}</b><small>{lead.nextDate}</small></span><span>›</span></button>) : <div className="empty-state"><strong>Nincs találat</strong><p>Módosítsd a keresést vagy a szűrőket.</p></div>}</div>
+  return <div className="dashboard-content">
+    <ActiveFilter filter={props.dashboardFilter} clear={props.clearDashboardFilter} />
+    <div className="filters"><input aria-label="Keresés" value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="Keresés név, telefon vagy azonosító alapján…" /><select aria-label="Státusz" value={props.statusFilter} onChange={(event) => { props.setStatusFilter(event.target.value); }}><option value="">Minden státusz</option>{STATUSES.map((status) => <option key={status}>{status}</option>)}</select><select aria-label="Szolgáltatás" value={props.serviceFilter} onChange={(event) => props.setServiceFilter(event.target.value)}><option value="">Minden szolgáltatás</option>{SERVICES.map((service) => <option key={service}>{service}</option>)}</select><select aria-label="Település" value={props.cityFilter} onChange={(event) => props.setCityFilter(event.target.value)}><option value="">Minden település</option>{cities.map((city) => <option key={city}>{city}</option>)}</select></div>
+    <div className="lead-table"><div className="table-head"><span>Érdeklődő</span><span>Szolgáltatás</span><span>Státusz</span><span>Prioritás</span><span>Következő lépés</span><span></span></div>{props.filteredLeads.length ? props.filteredLeads.map((lead) => <button className="table-row" key={lead.id} onClick={() => props.setSelected(lead)}><span><b>{lead.name}</b><small>{lead.id} • {lead.city}</small></span><span>{lead.service}</span><span><Status status={lead.status} /></span><span><i className={`priority ${lead.priority.toLowerCase()}`} />{lead.priority}</span><span><b>{lead.nextAction}</b><small>{lead.nextDate}</small></span><span>›</span></button>) : <div className="empty-state"><strong>Nincs találat</strong><p>Ehhez a szűréshez jelenleg nem tartozik rekord. Töröld a szűrést vagy válassz más feltételt.</p>{props.dashboardFilter && <button onClick={props.clearDashboardFilter}>Szűrés törlése</button>}</div>}</div>
   </div>;
 }
 
-function TaskList({ tasks, leads, completeTask, postponeTask, openLead }: {
+function TaskList({ tasks, leads, filter, clearFilter, completeTask, postponeTask, openLead }: {
   tasks: Task[];
   leads: Lead[];
+  filter: DashboardFilter;
+  clearFilter: () => void;
   completeTask: (id: string) => void;
   postponeTask: (id: string) => void;
   openLead: (lead: Lead) => void;
 }) {
-  const active = tasks.filter((t) => !t.done);
-  const groups = [["Lejárt", active.filter((t) => t.due < today())], ["Ma esedékes", active.filter((t) => t.due === today())], ["Következő hét", active.filter((t) => t.due > today())]] as [string, Task[]][];
-  return <div className="dashboard-content task-groups">{groups.map(([title, group]) => <section className="panel" key={title}><div className="panel-title"><div><h2>{title}</h2><p>{group.length} aktív feladat</p></div></div>{group.length ? group.map((task) => { const lead = leads.find((l) => l.id === task.leadId); return <div className="task-row" key={task.id}><span className={`priority-label ${task.priority.toLowerCase()}`}><i className={`priority ${task.priority.toLowerCase()}`} />{task.priority}</span><span><strong>{task.type}</strong><small>{lead?.name} • {lead?.phone} • {lead?.service}</small><small>{task.owner ?? "Bálint"}{task.note ? ` • ${task.note}` : ""}</small></span><time>{task.due}{task.time ? ` ${task.time}` : ""}</time><div><button onClick={() => completeTask(task.id)}>✓ Elvégezve</button><button onClick={() => postponeTask(task.id)}>+1 nap</button><button onClick={() => lead && openLead(lead)}>Ügyfél →</button></div></div>; }) : <div className="empty-state small"><strong>Nincs feladat ebben a csoportban</strong></div>}</section>)}</div>;
+  let active = tasks.filter((task) => !task.done);
+  if (filter?.scope === "task") {
+    active = active.filter((task) => {
+      if (filter.value === "overdue") return task.due < today();
+      if (filter.value === "today-callback") return task.due === today() && task.type.includes("Visszahívás");
+      if (filter.value === "survey") return task.type.toLowerCase().includes("felmérés");
+      return task.type.toLowerCase().includes("után") || Boolean(task.followupKey);
+    });
+  }
+  const groups = filter?.scope === "task"
+    ? [[filter.label, active] as [string, Task[]]]
+    : [["Lejárt", active.filter((task) => task.due < today())], ["Ma esedékes", active.filter((task) => task.due === today())], ["Következő hét", active.filter((task) => task.due > today())]] as [string, Task[]][];
+  return <div className="dashboard-content task-groups">
+    <ActiveFilter filter={filter} clear={clearFilter} />
+    {groups.map(([title, group]) => <section className="panel" key={title}><div className="panel-title"><div><h2>{title}</h2><p>{group.length} aktív feladat</p></div></div>{group.length ? group.map((task) => { const lead = leads.find((item) => item.id === task.leadId); return <div className="task-row" key={task.id}><span className={`priority-label ${task.priority.toLowerCase()}`}><i className={`priority ${task.priority.toLowerCase()}`} />{task.priority}</span><span><strong>{task.type}</strong><small>{lead?.name} • {lead?.phone} • {lead?.service}</small><small>{task.owner ?? "Bálint"}{task.note ? ` • ${task.note}` : ""}</small></span><time>{task.due}{task.time ? ` ${task.time}` : ""}</time><div><button onClick={() => completeTask(task.id)}>✓ Elvégezve</button><button onClick={() => postponeTask(task.id)}>+1 nap</button><button onClick={() => lead && openLead(lead)}>Ügyfél →</button></div></div>; }) : <div className="empty-state small"><strong>Nincs feladat ebben a csoportban</strong><p>A lista automatikusan frissül az aktuális teendőkből.</p></div>}</section>)}
+  </div>;
 }
 
-function Offers({ leads, openLead }: { leads: Lead[]; openLead: (lead: Lead) => void }) {
-  const offers = leads.filter((lead) => ["Ajánlat készül", "Ajánlat elküldve", "Utánkövetés szükséges", "Megnyert", "Elvesztett"].includes(lead.status));
-  return <div className="dashboard-content"><div className="offer-summary"><div><span>Nyitott ajánlati érték</span><strong>{money(offers.filter((l) => !["Megnyert", "Elvesztett"].includes(l.status)).reduce((sum, l) => sum + l.value, 0))}</strong></div><div><span>Megnyert érték</span><strong>{money(offers.filter((l) => l.status === "Megnyert").reduce((sum, l) => sum + l.value, 0))}</strong></div></div><div className="lead-table offer-table"><div className="table-head"><span>Ügyfél</span><span>Becsült érték</span><span>Státusz</span><span>Következő lépés</span><span></span></div>{offers.map((lead) => <button className="table-row" key={lead.id} onClick={() => openLead(lead)}><span><b>{lead.name}</b><small>{lead.city} • {lead.id}</small></span><span><b>{money(lead.value)}</b></span><span><Status status={lead.status} /></span><span>{lead.nextAction}<small>{lead.nextDate}{daysSince(lead.offerSentAt) !== null ? ` • ${daysSince(lead.offerSentAt)} napja vár` : ""}</small></span><span>›</span></button>)}</div></div>;
+function Offers({ leads, offers, filter, clearFilter, openLead, saveOffer, changeOfferStatus, duplicateOffer, company }: {
+  leads: Lead[];
+  offers: Offer[];
+  filter: DashboardFilter;
+  clearFilter: () => void;
+  openLead: (lead: Lead) => void;
+  saveOffer: (offer: Offer) => void;
+  changeOfferStatus: (offer: Offer, status: OfferStatus) => void;
+  duplicateOffer: (offer: Offer) => void;
+  company: CompanySettings;
+}) {
+  const [editing, setEditing] = useState<Offer | null>(null);
+  const visible = filter?.scope === "offer" ? offers.filter((offer) => offer.status === filter.value) : offers;
+  const openValue = offers.filter((offer) => !["Elfogadott", "Elutasított", "Lejárt"].includes(offer.status)).reduce((sum, offer) => sum + calculateOfferTotals(offer).gross, 0);
+  const wonValue = offers.filter((offer) => offer.status === "Elfogadott").reduce((sum, offer) => sum + calculateOfferTotals(offer).gross, 0);
+  const newOffer = () => setEditing({
+    id: `AJ-${new Date().getFullYear()}-${String(offers.length + 43).padStart(3, "0")}`,
+    leadId: leads[0]?.id ?? "",
+    createdAt: today(),
+    validUntil: addDays(company.offerValidityDays),
+    status: "Piszkozat",
+    lines: [{ id: `L-${Date.now()}`, name: "Új tétel", kind: "Anyag", quantity: 1, unitPrice: 0 }],
+    discountPercent: 0,
+    vatPercent: 27,
+    notes: "",
+    paymentTerms: company.paymentTerms,
+  });
+  return <div className="dashboard-content">
+    <ActiveFilter filter={filter} clear={clearFilter} />
+    <div className="section-actions"><div><h2>Árajánlatok</h2><p>Szerkeszthető, nyomtatható demóajánlatok utánkövetéssel.</p></div><button className="button-primary" onClick={newOffer}>+ Új ajánlat</button></div>
+    <div className="offer-summary"><div><span>Nyitott ajánlati érték</span><strong>{money(openValue)}</strong></div><div><span>Elfogadott érték</span><strong>{money(wonValue)}</strong></div></div>
+    <div className="offer-list"><div className="offer-list-head"><span>Ajánlat / ügyfél</span><span>Bruttó összeg</span><span>Állapot</span><span>Érvényesség</span><span>Műveletek</span></div>{visible.length ? visible.map((offer) => {
+      const lead = leads.find((item) => item.id === offer.leadId);
+      const totals = calculateOfferTotals(offer);
+      return <article className="offer-row" key={offer.id}>
+        <button className="offer-customer" onClick={() => lead && openLead(lead)}><strong>{offer.id}</strong><small>{lead?.name ?? "Törölt ügyfél"} • {lead?.service}</small></button>
+        <strong>{money(totals.gross)}</strong>
+        <select aria-label={`${offer.id} állapota`} value={offer.status} onChange={(event) => changeOfferStatus(offer, event.target.value as OfferStatus)}>{(["Piszkozat", "Jóváhagyásra vár", "Kiküldött", "Megtekintett", "Elfogadott", "Elutasított", "Lejárt"] as OfferStatus[]).map((status) => <option key={status}>{status}</option>)}</select>
+        <time>{offer.validUntil}</time>
+        <div><button onClick={() => setEditing(offer)}>Szerkesztés</button><button onClick={() => duplicateOffer(offer)}>Másolat</button></div>
+      </article>;
+    }) : <div className="empty-state"><strong>Nincs találat</strong><p>Ehhez a szűréshez nincs ajánlat.</p><button onClick={clearFilter}>Szűrés törlése</button></div>}</div>
+    {editing && <OfferEditor offer={editing} leads={leads} company={company} close={() => setEditing(null)} save={(draft) => { saveOffer(draft); if (draft.status !== "Piszkozat") changeOfferStatus(draft, draft.status); setEditing(null); }} />}
+  </div>;
 }
 
-function Reports({ leads, tasks }: { leads: Lead[]; tasks: Task[] }) {
+function OfferEditor({ offer, leads, company, close, save }: {
+  offer: Offer;
+  leads: Lead[];
+  company: CompanySettings;
+  close: () => void;
+  save: (offer: Offer) => void;
+}) {
+  const [draft, setDraft] = useState(offer);
+  const totals = calculateOfferTotals(draft);
+  const updateLine = (id: string, field: keyof Offer["lines"][number], value: string | number) => {
+    setDraft((previous) => ({ ...previous, lines: previous.lines.map((line) => line.id === id ? { ...line, [field]: value } : line) }));
+  };
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("keydown", keydown);
+    return () => document.removeEventListener("keydown", keydown);
+  }, [close]);
+  return <div className="modal-backdrop" onMouseDown={close}><div className="offer-editor printable-offer" role="dialog" aria-modal="true" aria-labelledby="offer-editor-title" onMouseDown={(event) => event.stopPropagation()}>
+    <header><div><span>{company.name} • demó ajánlat</span><h2 id="offer-editor-title">{draft.id}</h2></div><button aria-label="Ajánlatszerkesztő bezárása" onClick={close}>×</button></header>
+    <div className="offer-fields"><label><span>Ügyfél *</span><select value={draft.leadId} onChange={(event) => setDraft((previous) => ({ ...previous, leadId: event.target.value }))}>{leads.map((lead) => <option value={lead.id} key={lead.id}>{lead.name} – {lead.service}</option>)}</select></label><label><span>Állapot</span><select value={draft.status} onChange={(event) => setDraft((previous) => ({ ...previous, status: event.target.value as OfferStatus }))}>{(["Piszkozat", "Jóváhagyásra vár", "Kiküldött", "Megtekintett", "Elfogadott", "Elutasított", "Lejárt"] as OfferStatus[]).map((status) => <option key={status}>{status}</option>)}</select></label><label><span>Érvényes eddig</span><input type="date" value={draft.validUntil} onChange={(event) => setDraft((previous) => ({ ...previous, validUntil: event.target.value }))} /></label></div>
+    <div className="offer-line-head"><span>Tétel</span><span>Típus</span><span>Mennyiség</span><span>Egységár</span><span></span></div>
+    <div className="offer-lines">{draft.lines.map((line) => <div className="offer-line" key={line.id}><input aria-label="Tétel megnevezése" value={line.name} onChange={(event) => updateLine(line.id, "name", event.target.value)} /><select aria-label="Tétel típusa" value={line.kind} onChange={(event) => updateLine(line.id, "kind", event.target.value)}><option>Anyag</option><option>Munkadíj</option><option>Egyéb</option></select><input aria-label="Mennyiség" type="number" min="0" step="1" value={line.quantity} onChange={(event) => updateLine(line.id, "quantity", Number(event.target.value))} /><input aria-label="Egységár" type="number" min="0" step="1000" value={line.unitPrice} onChange={(event) => updateLine(line.id, "unitPrice", Number(event.target.value))} /><button aria-label="Tétel törlése" disabled={draft.lines.length === 1} onClick={() => setDraft((previous) => ({ ...previous, lines: previous.lines.filter((item) => item.id !== line.id) }))}>×</button></div>)}</div>
+    <button className="button-ghost add-line" onClick={() => setDraft((previous) => ({ ...previous, lines: [...previous.lines, { id: `L-${Date.now()}`, name: "Új tétel", kind: "Anyag", quantity: 1, unitPrice: 0 }] }))}>+ Tétel hozzáadása</button>
+    <div className="offer-editor-bottom"><div className="offer-notes"><label><span>Fizetési feltételek</span><textarea value={draft.paymentTerms} onChange={(event) => setDraft((previous) => ({ ...previous, paymentTerms: event.target.value }))} /></label><label><span>Megjegyzések</span><textarea value={draft.notes} onChange={(event) => setDraft((previous) => ({ ...previous, notes: event.target.value }))} /></label></div><div className="offer-totals"><label><span>Kedvezmény %</span><input type="number" min="0" max="100" value={draft.discountPercent} onChange={(event) => setDraft((previous) => ({ ...previous, discountPercent: Number(event.target.value) }))} /></label><label><span>Áfa %</span><input type="number" min="0" value={draft.vatPercent} onChange={(event) => setDraft((previous) => ({ ...previous, vatPercent: Number(event.target.value) }))} /></label><p><span>Részösszeg</span><strong>{money(totals.subtotal)}</strong></p><p><span>Kedvezmény</span><strong>− {money(totals.discount)}</strong></p><p><span>Nettó</span><strong>{money(totals.net)}</strong></p><p><span>Áfa</span><strong>{money(totals.vat)}</strong></p><p className="gross"><span>Bruttó végösszeg</span><strong>{money(totals.gross)}</strong></p></div></div>
+    <footer><small>Ez fiktív demóajánlat, nem minősül végleges árajánlatnak.</small><div><button className="button-ghost" onClick={() => window.print()}>Nyomtatás / PDF</button><button className="button-primary" disabled={!draft.leadId || !draft.lines.length} onClick={() => save(draft)}>Ajánlat mentése</button></div></footer>
+  </div></div>;
+}
+
+function CalendarView({ leads, entries, company, saveEntry, openLead }: {
+  leads: Lead[];
+  entries: CalendarEntry[];
+  company: CompanySettings;
+  saveEntry: (entry: CalendarEntry) => boolean;
+  openLead: (lead: Lead) => void;
+}) {
+  const [view, setView] = useState<"Nap" | "Hét" | "Lista">("Hét");
+  const [editing, setEditing] = useState<CalendarEntry | null>(null);
+  const weekEnd = addDays(6);
+  const visible = entries
+    .filter((entry) => view === "Lista" || (view === "Nap" ? entry.date === today() : entry.date >= today() && entry.date <= weekEnd))
+    .sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`));
+  const createEntry = () => setEditing({
+    id: `CAL-${Date.now()}`,
+    leadId: leads[0]?.id ?? "",
+    title: "Új időpont",
+    type: "Helyszíni felmérés",
+    date: today(),
+    time: "09:00",
+    duration: 60,
+    owner: company.team[0] ?? "Bálint",
+    address: leads[0]?.city ?? "",
+    notes: "",
+  });
+  return <div className="dashboard-content calendar-view">
+    <div className="section-actions"><div><h2>Időpontok és felmérések</h2><p>A naptár demómódban, külső szolgáltatás nélkül működik.</p></div><button className="button-primary" onClick={createEntry}>+ Új időpont</button></div>
+    <div className="view-switch" aria-label="Naptárnézet">{(["Nap", "Hét", "Lista"] as const).map((item) => <button aria-pressed={view === item} className={view === item ? "active" : ""} key={item} onClick={() => setView(item)}>{item}</button>)}</div>
+    <section className="panel calendar-list">
+      <div className="panel-title"><div><h2>{view === "Nap" ? "Mai program" : view === "Hét" ? "Következő 7 nap" : "Összes időpont"}</h2><p>{visible.length} bejegyzés</p></div></div>
+      {visible.length ? visible.map((entry) => {
+        const lead = leads.find((item) => item.id === entry.leadId);
+        return <article className="calendar-row" key={entry.id}>
+          <time><strong>{entry.date}</strong><span>{entry.time} • {entry.duration} perc</span></time>
+          <span><strong>{entry.title}</strong><small>{entry.type} • {entry.owner}</small><small>{entry.address}</small></span>
+          <div><a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(entry.address)}`} target="_blank" rel="noreferrer">Térkép</a><button onClick={() => lead && openLead(lead)}>Ügyfél</button><button onClick={() => setEditing(entry)}>Módosítás</button></div>
+        </article>;
+      }) : <div className="empty-state"><strong>Nincs időpont ebben a nézetben</strong><p>Hozz létre új időpontot, vagy válts másik nézetre.</p></div>}
+    </section>
+    {editing && <CalendarEditor entry={editing} leads={leads} team={company.team} close={() => setEditing(null)} save={(entry) => { if (saveEntry(entry)) setEditing(null); }} />}
+  </div>;
+}
+
+function CalendarEditor({ entry, leads, team, close, save }: {
+  entry: CalendarEntry;
+  leads: Lead[];
+  team: string[];
+  close: () => void;
+  save: (entry: CalendarEntry) => void;
+}) {
+  const [draft, setDraft] = useState(entry);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [close]);
+  return <div className="modal-backdrop" onMouseDown={close}><div className="calendar-editor" role="dialog" aria-modal="true" aria-labelledby="calendar-editor-title" onMouseDown={(event) => event.stopPropagation()}>
+    <header><div><span>Szimulált naptárbejegyzés</span><h2 id="calendar-editor-title">Időpont részletei</h2></div><button aria-label="Időpontszerkesztő bezárása" onClick={close}>×</button></header>
+    <div className="calendar-form">
+      <label><span>Ügyfél *</span><select value={draft.leadId} onChange={(event) => { const lead = leads.find((item) => item.id === event.target.value); setDraft((previous) => ({ ...previous, leadId: event.target.value, address: lead?.city ?? previous.address, title: `${previous.type} – ${lead?.name ?? ""}` })); }}>{leads.map((lead) => <option key={lead.id} value={lead.id}>{lead.name} – {lead.city}</option>)}</select></label>
+      <label><span>Típus *</span><select value={draft.type} onChange={(event) => setDraft((previous) => ({ ...previous, type: event.target.value as CalendarEntry["type"] }))}><option>Telefonos egyeztetés</option><option>Visszahívás</option><option>Helyszíni felmérés</option><option>Ajánlat-utánkövetés</option><option>Egyéb</option></select></label>
+      <label><span>Megnevezés *</span><input value={draft.title} onChange={(event) => setDraft((previous) => ({ ...previous, title: event.target.value }))} /></label>
+      <label><span>Dátum *</span><input type="date" value={draft.date} onChange={(event) => setDraft((previous) => ({ ...previous, date: event.target.value }))} /></label>
+      <label><span>Kezdés *</span><input type="time" value={draft.time} onChange={(event) => setDraft((previous) => ({ ...previous, time: event.target.value }))} /></label>
+      <label><span>Időtartam (perc)</span><input type="number" min="10" step="10" value={draft.duration} onChange={(event) => setDraft((previous) => ({ ...previous, duration: Number(event.target.value) }))} /></label>
+      <label><span>Felelős *</span><select value={draft.owner} onChange={(event) => setDraft((previous) => ({ ...previous, owner: event.target.value }))}>{team.map((owner) => <option key={owner}>{owner}</option>)}</select></label>
+      <label><span>Cím / település</span><input value={draft.address} onChange={(event) => setDraft((previous) => ({ ...previous, address: event.target.value }))} /></label>
+      <label className="wide"><span>Megjegyzés</span><textarea value={draft.notes} onChange={(event) => setDraft((previous) => ({ ...previous, notes: event.target.value }))} /></label>
+    </div>
+    <footer><button className="button-ghost" onClick={close}>Mégse</button><button className="button-primary" disabled={!draft.leadId || !draft.title || !draft.date || !draft.time || !draft.owner} onClick={() => save(draft)}>Időpont mentése</button></footer>
+  </div></div>;
+}
+
+function WorkdayView({ leads, tasks, completeTask, postponeTask, openLead, showToast, addQuickNote }: {
+  leads: Lead[];
+  tasks: Task[];
+  completeTask: (id: string) => void;
+  postponeTask: (id: string) => void;
+  openLead: (lead: Lead) => void;
+  showToast: (message: string) => void;
+  addQuickNote: (leadId: string, text: string) => void;
+}) {
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const daily = tasks.filter((task) => !task.done && task.due <= today()).sort((a, b) => `${a.due}${a.time ?? ""}`.localeCompare(`${b.due}${b.time ?? ""}`));
+  return <div className="dashboard-content workday">
+    <div className="workday-hero"><div><span>Mobil munkanap</span><h2>{new Intl.DateTimeFormat("hu-HU", { weekday: "long", month: "long", day: "numeric" }).format(new Date())}</h2><p>{daily.length} aktív mai vagy lejárt teendő.</p></div><strong>{daily.filter((task) => task.due < today()).length}<small>lejárt</small></strong></div>
+    <div className="workday-list">{daily.length ? daily.map((task, index) => {
+      const lead = leads.find((item) => item.id === task.leadId);
+      if (!lead) return null;
+      return <article className="workday-card" key={task.id}>
+        <header><span>{index === 0 ? "Következő ügyfél" : task.due < today() ? "Lejárt" : "Ma"}</span><time>{task.time || "Egyeztetendő"}</time></header>
+        <h3>{task.type}</h3><p><strong>{lead.name}</strong> • {lead.city}</p><small>{lead.service}</small>
+        <div className="workday-primary-actions"><a href={`tel:${lead.phone.replaceAll(" ", "")}`}>☎ Hívás</a><a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lead.zip} ${lead.city}`)}`} target="_blank" rel="noreferrer">⌖ Térkép</a><button onClick={() => openLead(lead)}>Adatlap</button></div>
+        <div className="quick-note"><input aria-label={`Gyors jegyzet ${lead.name} részére`} value={notes[task.id] ?? ""} onChange={(event) => setNotes((previous) => ({ ...previous, [task.id]: event.target.value }))} placeholder="Gyors belső jegyzet…" /><button onClick={() => { addQuickNote(lead.id, notes[task.id] ?? ""); setNotes((previous) => ({ ...previous, [task.id]: "" })); }}>Mentés</button></div>
+        <div className="workday-secondary-actions"><label className="file-simulation">Kép csatolása<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; if (file.size > 5_000_000) showToast("A demó legfeljebb 5 MB-os képet fogad."); else showToast(`${file.name} kiválasztva – demómódban nem kerül feltöltésre.`); event.target.value = ""; }} /></label><button onClick={() => postponeTask(task.id)}>Új időpont: +1 nap</button><button className="done" onClick={() => completeTask(task.id)}>✓ Elvégezve</button></div>
+      </article>;
+    }) : <div className="empty-state"><strong>A mai munkalista elkészült</strong><p>Nincs aktív vagy lejárt feladat.</p></div>}</div>
+  </div>;
+}
+
+function Reports({ leads, tasks, offers }: { leads: Lead[]; tasks: Task[]; offers: Offer[] }) {
   const metrics = computeReportMetrics(leads, tasks);
   const services = SERVICES.map((service) => ({ service: service.replace(" telepítése", "").replace(" vagy karbantartás", ""), count: leads.filter((lead) => lead.service === service).length })).filter((item) => item.count);
   const sources = Array.from(new Set(leads.map((lead) => lead.source))).map((source) => ({ source, count: leads.filter((lead) => lead.source === source).length }));
   const statuses = STATUSES.map((status) => ({ status, count: leads.filter((lead) => lead.status === status).length })).filter((item) => item.count);
   const lossReasons = Array.from(new Set(leads.filter((lead) => lead.lossReason).map((lead) => lead.lossReason as string))).map((reason) => ({ reason, count: leads.filter((lead) => lead.lossReason === reason).length }));
+  const cities = Array.from(new Set(leads.map((lead) => lead.city))).map((city) => ({ city, count: leads.filter((lead) => lead.city === city).length })).sort((a, b) => b.count - a.count).slice(0, 6);
+  const sentOffers = offers.filter((offer) => !["Piszkozat", "Jóváhagyásra vár"].includes(offer.status));
+  const acceptedOffers = offers.filter((offer) => offer.status === "Elfogadott");
+  const offerConversion = sentOffers.length ? Math.round((acceptedOffers.length / sentOffers.length) * 100) : null;
+  const averageOffer = offers.length ? Math.round(offers.reduce((sum, offer) => sum + calculateOfferTotals(offer).gross, 0) / offers.length) : null;
+  const responseHours = leads.length ? Math.round(leads.reduce((sum, lead) => {
+    const created = new Date(`${lead.createdAt}T12:00:00`).getTime();
+    const contacted = new Date(`${lead.lastContactAt ?? lead.createdAt}T12:00:00`).getTime();
+    return sum + Math.max(0, (contacted - created) / 3_600_000);
+  }, 0) / leads.length) : null;
+  const climateCount = leads.filter((lead) => lead.service.toLowerCase().includes("klíma")).length;
+  const heatPumpCount = leads.filter((lead) => lead.service.toLowerCase().includes("hőszivattyú")).length;
   const maxCount = (items: { count: number }[]) => Math.max(1, ...items.map((item) => item.count));
-  return <div className="dashboard-content reports"><div className="report-note">A megjelenített számok fiktív demóadatok. Minden mutató az aktuális rekordokból számolódik.</div><div className="report-metrics expanded"><article><span>Összes érdeklődő</span><strong>{metrics.total}</strong><small>{metrics.newCount} új státuszú</small></article><article><span>Kiküldött ajánlatok</span><strong>{metrics.sentCount}</strong><small>{metrics.leadToOfferRate === null ? "Nincs elég adat" : `${metrics.leadToOfferRate}% érdeklődőből ajánlat`}</small></article><article><span>Megnyert / elvesztett</span><strong>{metrics.wonCount} / {metrics.lostCount}</strong><small>{metrics.offerToWinRate === null ? "Nincs elég adat" : `${metrics.offerToWinRate}% ajánlatból megnyert`}</small></article><article><span>Átlagos ajánlati érték</span><strong>{metrics.averageOfferValue === null ? "—" : money(metrics.averageOfferValue)}</strong><small>Fiktív becslés</small></article><article><span>Becsült folyamatérték</span><strong>{money(metrics.pipelineValue)}</strong><small>Aktív, nem végleges összeg</small></article><article><span>Utánkövetés nélkül</span><strong>{metrics.withoutFollowup}</strong><small>{metrics.withoutFollowup ? "Beavatkozás szükséges" : "Minden ajánlatnak van feladata"}</small></article></div>
-    <div className="chart-grid"><section className="panel"><h2>Érdeklődők szolgáltatásonként</h2>{services.length ? <div className="bars">{services.map((item) => <div key={item.service}><span>{item.service}</span><i><b style={{ width: `${(item.count / maxCount(services)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div> : <div className="empty-state small"><strong>Még nincs elegendő adat.</strong></div>}</section><section className="panel"><h2>Érdeklődők forrása</h2>{sources.length ? <div className="bars green">{sources.map((item) => <div key={item.source}><span>{item.source}</span><i><b style={{ width: `${(item.count / maxCount(sources)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div> : <div className="empty-state small"><strong>Még nincs elegendő adat.</strong></div>}</section><section className="panel"><h2>Státuszonkénti megoszlás</h2><div className="bars">{statuses.map((item) => <div key={item.status}><span>{item.status}</span><i><b style={{ width: `${(item.count / maxCount(statuses)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div></section><section className="panel"><h2>Elvesztési okok</h2>{lossReasons.length ? <div className="bars green">{lossReasons.map((item) => <div key={item.reason}><span>{item.reason}</span><i><b style={{ width: `${(item.count / maxCount(lossReasons)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div> : <div className="empty-state small"><strong>Még nincs rögzített elvesztési ok.</strong></div>}</section></div>
+  return <div className="dashboard-content reports"><div className="report-note">A megjelenített számok fiktív demóadatok. Minden mutató az aktuális rekordokból számolódik.</div><div className="report-metrics expanded"><article><span>Összes érdeklődő</span><strong>{metrics.total}</strong><small>{metrics.newCount} új státuszú</small></article><article><span>Ajánlatból megrendelés</span><strong>{offerConversion === null ? "—" : `${offerConversion}%`}</strong><small>{acceptedOffers.length} elfogadott / {sentOffers.length} kiküldött</small></article><article><span>Megnyert / elvesztett</span><strong>{metrics.wonCount} / {metrics.lostCount}</strong><small>Aktuális érdeklődőstátuszok</small></article><article><span>Átlagos ajánlati érték</span><strong>{averageOffer === null ? "—" : money(averageOffer)}</strong><small>Az ajánlatmodul adataiból</small></article><article><span>Átlagos első válaszidő</span><strong>{responseHours === null ? "—" : `${responseHours} óra`}</strong><small>Rögzített dátumok alapján</small></article><article><span>Lejárt feladatok</span><strong>{tasks.filter((task) => !task.done && task.due < today()).length}</strong><small>{metrics.withoutFollowup} ajánlat utánkövetés nélkül</small></article></div>
+    <div className="comparison-panel panel"><h2>Klíma és hőszivattyú érdeklődések</h2><div><span>Klíma<strong>{climateCount}</strong></span><i><b style={{ width: `${leads.length ? (climateCount / leads.length) * 100 : 0}%` }} /></i><span>Hőszivattyú<strong>{heatPumpCount}</strong></span></div></div>
+    <div className="chart-grid"><section className="panel"><h2>Érdeklődők szolgáltatásonként</h2>{services.length ? <div className="bars">{services.map((item) => <div key={item.service}><span>{item.service}</span><i><b style={{ width: `${(item.count / maxCount(services)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div> : <div className="empty-state small"><strong>Még nincs elegendő adat.</strong></div>}</section><section className="panel"><h2>Érdeklődők forrása</h2>{sources.length ? <div className="bars green">{sources.map((item) => <div key={item.source}><span>{item.source}</span><i><b style={{ width: `${(item.count / maxCount(sources)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div> : <div className="empty-state small"><strong>Még nincs elegendő adat.</strong></div>}</section><section className="panel"><h2>Legaktívabb települések</h2><div className="bars">{cities.map((item) => <div key={item.city}><span>{item.city}</span><i><b style={{ width: `${(item.count / maxCount(cities)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div></section><section className="panel"><h2>Elvesztési okok</h2>{lossReasons.length ? <div className="bars green">{lossReasons.map((item) => <div key={item.reason}><span>{item.reason}</span><i><b style={{ width: `${(item.count / maxCount(lossReasons)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div> : <div className="empty-state small"><strong>Még nincs rögzített elvesztési ok.</strong></div>}</section><section className="panel"><h2>Státuszonkénti megoszlás</h2><div className="bars">{statuses.map((item) => <div key={item.status}><span>{item.status}</span><i><b style={{ width: `${(item.count / maxCount(statuses)) * 100}%` }} /></i><strong>{item.count}</strong></div>)}</div></section></div>
   </div>;
 }
 
-function Settings({ resetDemo }: { resetDemo: () => void }) {
-  return <div className="dashboard-content settings"><section className="panel"><h2>Demóbeállítások</h2><p>Az alkalmazás kizárólag helyi, fiktív adatokat használ. Nincs valódi e-mail-, SMS- vagy fájlküldés.</p><div className="setting-row"><div><strong>Demóadatok visszaállítása</strong><small>Törli az ezen az eszközön végzett módosításokat.</small></div><button className="danger-button" onClick={resetDemo}>Alaphelyzet</button></div><div className="setting-row"><div><strong>Automatikus utánkövetés</strong><small>Ajánlat elküldésekor 3 és 7 napos feladat készül.</small></div><span className="toggle on">Bekapcsolva</span></div><div className="setting-row"><div><strong>Adattárolás</strong><small>A demóadatok csak a böngésző helyi tárhelyén maradnak meg.</small></div><span className="tag">localStorage</span></div></section><section className="panel legal-panel"><h2>Adatvédelmi figyelmeztetés</h2><p>Ez nem kész jogi dokumentum. Éles rendszerhez adatkezelési tájékoztató, szerepkörök, megőrzési idők, hozzáférések és megfelelő technikai védelem szükséges.</p></section></div>;
+function Settings({ resetDemo, company, setCompany, communications, setMessagePreview, dataMode, exportPilotData }: {
+  resetDemo: () => void;
+  company: CompanySettings;
+  setCompany: React.Dispatch<React.SetStateAction<CompanySettings>>;
+  communications: CommunicationLog[];
+  setMessagePreview: (message: CommunicationLog) => void;
+  dataMode: DataMode;
+  exportPilotData: () => void;
+}) {
+  const update = <Key extends keyof CompanySettings>(key: Key, value: CompanySettings[Key]) => setCompany((previous) => ({ ...previous, [key]: value }));
+  const updateTemplate = (key: keyof CompanySettings["templates"], value: string) => setCompany((previous) => ({ ...previous, templates: { ...previous.templates, [key]: value } }));
+  return <div className="dashboard-content settings">
+    <section className="panel"><div className="panel-title"><div><h2>Céges megjelenés</h2><p>A módosítások a demóadatokkal együtt mentődnek.</p></div><span className="tag">{dataMode}</span></div><div className="settings-form"><label><span>Vállalkozás neve</span><input value={company.name} onChange={(event) => update("name", event.target.value)} /></label><label><span>Telefonszám</span><input value={company.phone} onChange={(event) => update("phone", event.target.value)} /></label><label><span>E-mail-cím</span><input type="email" value={company.email} onChange={(event) => update("email", event.target.value)} /></label><label><span>Szolgáltatási terület</span><input value={company.serviceArea} onChange={(event) => update("serviceArea", event.target.value)} /></label><label><span>Elsődleges szín</span><input type="color" value={company.primaryColor} onChange={(event) => update("primaryColor", event.target.value)} /></label><label><span>Ajánlat érvényessége (nap)</span><input type="number" min="1" value={company.offerValidityDays} onChange={(event) => update("offerValidityDays", Number(event.target.value))} /></label><label><span>Adatmegőrzés (nap)</span><input type="number" min="1" value={company.retentionDays} onChange={(event) => update("retentionDays", Number(event.target.value))} /></label><label className="wide"><span>Fizetési feltételek</span><textarea value={company.paymentTerms} onChange={(event) => update("paymentTerms", event.target.value)} /></label><label className="wide"><span>Munkatársak – vesszővel elválasztva</span><input value={company.team.join(", ")} onChange={(event) => update("team", event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} /></label></div></section>
+    <section className="panel"><h2>Magyar üzenetsablonok</h2><p>Demómódban csak előnézet készül, valódi e-mail nem kerül kiküldésre.</p><div className="template-list"><label><span>Ajánlatkérés visszaigazolása</span><textarea value={company.templates.leadConfirmation} onChange={(event) => updateTemplate("leadConfirmation", event.target.value)} /></label><label><span>Új érdeklődő értesítés</span><textarea value={company.templates.ownerNotification} onChange={(event) => updateTemplate("ownerNotification", event.target.value)} /></label><label><span>Ajánlatküldő üzenet</span><textarea value={company.templates.offerEmail} onChange={(event) => updateTemplate("offerEmail", event.target.value)} /></label><label><span>Utánkövetés</span><textarea value={company.templates.followupEmail} onChange={(event) => updateTemplate("followupEmail", event.target.value)} /></label><label><span>Időpont-emlékeztető</span><textarea value={company.templates.appointmentReminder} onChange={(event) => updateTemplate("appointmentReminder", event.target.value)} /></label></div></section>
+    <section className="panel"><div className="panel-title"><div><h2>Kommunikációs napló</h2><p>Az utolsó szimulált üzenetek előnézete.</p></div></div>{communications.length ? communications.slice(0, 6).map((message) => <button className="communication-row" key={message.id} onClick={() => setMessagePreview(message)}><span><strong>{message.subject}</strong><small>{message.kind} • {new Date(message.createdAt).toLocaleString("hu-HU")}</small></span><b>Előnézet →</b></button>) : <div className="empty-state small"><strong>Még nincs kommunikációs esemény</strong></div>}</section>
+    <section className="panel"><h2>Adatkezelési műveletek</h2><div className="setting-row"><div><strong>Demóadatok exportálása</strong><small>Letölti az érdeklődőket, feladatokat, ajánlatokat és időpontokat JSON-formátumban.</small></div><button onClick={exportPilotData}>Exportálás</button></div><div className="setting-row"><div><strong>Demóadatok visszaállítása</strong><small>Törli az ezen a munkaterületen végzett fiktív módosításokat.</small></div><button className="danger-button" onClick={resetDemo}>Alaphelyzet</button></div><div className="setting-row"><div><strong>Automatikus utánkövetés</strong><small>Ajánlat kiküldésekor deduplikált 3 és 7 napos feladat készül.</small></div><span className="toggle on">Bekapcsolva</span></div></section>
+    <section className="panel legal-panel"><h2>Adatvédelmi figyelmeztetés</h2><p>Ez demó szöveg, nem jogász által ellenőrzött vagy kész jogi dokumentum. Éles rendszerhez hozzáférés-szabályozás, mentés, naplózás, spamvédelem és jogilag ellenőrzött adatkezelési tájékoztató szükséges.</p><p>A pilot adatmodell támogatja az exportot, ügyfelenkénti törlést, eseményidővonalat és beállítható megőrzési időt.</p></section>
+  </div>;
 }
 
-function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note, setNote, addNote, tasks }: {
+function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note, setNote, addNote, deleteLead, tasks }: {
   lead: Lead;
   close: () => void;
   changeStatus: (lead: Lead, status: LeadStatus) => void;
@@ -850,6 +1469,7 @@ function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note
   note: string;
   setNote: (s: string) => void;
   addNote: () => void;
+  deleteLead: (lead: Lead) => void;
   tasks: Task[];
 }) {
   const [taskForm, setTaskForm] = useState(DEFAULT_TASK_FORM);
@@ -888,9 +1508,29 @@ function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note
         <section><h3>Új következő feladat</h3><div className="task-form"><label><span>Feladat típusa *</span><select value={taskForm.type} onChange={(event) => setTaskForm((previous) => ({ ...previous, type: event.target.value }))}>{TASK_TYPES.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>Határidő *</span><input type="date" value={taskForm.due} onChange={(event) => setTaskForm((previous) => ({ ...previous, due: event.target.value }))} /></label><label><span>Időpont – opcionális</span><input type="time" value={taskForm.time} onChange={(event) => setTaskForm((previous) => ({ ...previous, time: event.target.value }))} /></label><label><span>Prioritás *</span><select value={taskForm.priority} onChange={(event) => setTaskForm((previous) => ({ ...previous, priority: event.target.value as Priority }))}>{["Magas", "Közepes", "Alacsony"].map((priority) => <option key={priority}>{priority}</option>)}</select></label><label><span>Felelős *</span><select value={taskForm.owner} onChange={(event) => setTaskForm((previous) => ({ ...previous, owner: event.target.value }))}>{["Bálint", "Dóra"].map((owner) => <option key={owner}>{owner}</option>)}</select></label><label className="wide"><span>Belső megjegyzés – opcionális</span><textarea value={taskForm.note} onChange={(event) => setTaskForm((previous) => ({ ...previous, note: event.target.value }))} /></label></div>{taskError && <p className="field-error" role="alert">{taskError}</p>}<button className="button-primary task-save" onClick={saveTask}>Feladat létrehozása</button></section>
         <section><h3>Belső jegyzet</h3><div className="note-box"><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Új belső jegyzet…" /><button onClick={addNote}>Jegyzet mentése</button></div>{lead.notes.map((item, index) => <p className="saved-note" key={index}>{item}</p>)}</section>
         <section><h3>Események</h3><div className="timeline">{lead.timeline.map((item, index) => <p key={index}><i /><span>{item}</span></p>)}</div></section>
+        <section className="privacy-actions"><h3>Adatkezelés</h3><p>Ez a művelet csak a fiktív demóadatokra vonatkozik.</p><button className="danger-button" onClick={() => deleteLead(lead)}>Ügyfél és kapcsolódó demóadatok törlése</button></section>
       </div>
     </aside>
   </div>;
+}
+
+function MessagePreview({ message, close }: { message: CommunicationLog; close: () => void }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [close]);
+  return <div className="modal-backdrop" onMouseDown={close}><div className="message-preview" role="dialog" aria-modal="true" aria-labelledby="message-preview-title" onMouseDown={(event) => event.stopPropagation()}>
+    <button className="modal-close" aria-label="Üzenetelőnézet bezárása" onClick={close}>×</button>
+    <span className="eyebrow">{message.mode}</span>
+    <h2 id="message-preview-title">{message.subject}</h2>
+    <div className="message-meta"><span>{message.kind}</span><time>{new Date(message.createdAt).toLocaleString("hu-HU")}</time></div>
+    <pre>{message.body}</pre>
+    <p className="demo-warning">Valódi e-mail vagy SMS nem került kiküldésre.</p>
+    <button className="button-primary full-button" onClick={close}>Előnézet bezárása</button>
+  </div></div>;
 }
 
 function Booking({ close, confirm }: { close: () => void; confirm: () => void }) {

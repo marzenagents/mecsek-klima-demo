@@ -1,41 +1,83 @@
-# Mecsek Klíma – ajánlatkérő és utánkövető demó
+# Mecsek Klíma – ajánlatkérő és ügyfélkövető pilot demó
 
-Önálló, magyar nyelvű webalkalmazás-demó klíma- és hőszivattyú-szerelő vállalkozások számára. A rendszer minden megjelenített személyes és üzleti adata fiktív.
+Magyar nyelvű, mobilbarát webalkalmazás-demó klíma- és hőszivattyú-szerelő vállalkozásoknak. A rendszer minden alapfunkciója külső API-kulcs nélkül, fiktív adatokkal is működik.
+
+> A Mecsek Klíma fiktív demómárka. A nevek, elérhetőségek, ajánlatok és üzleti adatok tesztadatok.
 
 ## Fő funkciók
 
-- mobilbarát nyilvános kezdőoldal;
-- külön, egy percen belül kitölthető gyors visszahívási űrlap;
-- ötlépéses, feltételes ajánlatkérő;
-- mezőszintű magyar validáció és akadálymentes hibaüzenetek;
-- helyi visszaigazolás- és időpontfoglalás-szimuláció;
-- vállalkozói irányítópult;
-- kereshető és szűrhető érdeklődőlista;
-- módosítható státuszok, jegyzetek és eseményidővonal;
-- kézzel létrehozható, elvégezhető és elhalasztható következő feladatok;
-- duplikációmentes automatikus 3 és 7 napos ajánlat-utánkövetés;
-- ajánlati várakozási idő, utolsó kapcsolat és elvesztési ok kezelése;
-- az aktuális rekordokból dinamikusan számolt kimutatások;
-- nyolclépéses, előre kitöltött vezetett demóbemutató;
-- böngészőben megmaradó adatok és visszaállítási lehetőség.
+- többlépéses ajánlatkérő és gyors visszahívási kérés;
+- dinamikus, kattintható admin áttekintőkártyák;
+- URL-ben tárolt szűrt navigáció és működő böngésző-visszalépés;
+- érdeklődő-, feladat-, státusz- és utánkövetés-kezelés;
+- szerkeszthető, nyomtatható/PDF-be menthető árajánlat;
+- deduplikált 3 és 7 napos ajánlat-utánkövetés;
+- napi, heti és lista naptárnézet ütközésjelzéssel;
+- telefonra optimalizált Munkanap felület;
+- szimulált e-mail-előnézetek és kommunikációs napló;
+- dinamikus értékesítési és területi kimutatások;
+- szerkeszthető céges adatok és magyar üzenetsablonok;
+- JSON-adatexport, ügyfelenkénti törlés és demó-visszaállítás.
 
-## Helyi futtatás
+## Helyi indítás
 
-1. Telepíts legalább Node.js 22.13-as verziót.
-2. A projekt mappájában futtasd: `npm ci`
-3. Indítsd el: `npm run dev`
-4. Nyisd meg a terminálban megjelenő helyi címet.
+Előfeltétel: Node.js 22.13 vagy újabb.
 
-## Ellenőrzés
+```powershell
+npm install
+npm run dev
+```
 
-- Éles build: `npm run build`
-- Automatizált teszt: `npm test`
-- Kódellenőrzés: `npm run lint`
+A fejlesztői kiszolgáló által kiírt helyi címet nyisd meg a böngészőben.
 
-## Adatkezelés
+## Ellenőrzések
 
-A demó nem használ valódi háttérrendszert, nem küld e-mailt vagy SMS-t, és nem tölt fel fájlokat. Az űrlapadatokat az adott böngésző helyi tárhelyén tárolja. Éles használat előtt külön adatvédelmi, biztonsági és jogi felülvizsgálat szükséges.
+```powershell
+npm run lint
+npm run build
+npm test
+```
 
-## Környezeti változók
+## Adattárolási módok
 
-Az alapdemó külső szolgáltatás és API-kulcs nélkül működik. A `.env.example` csak a későbbi integrációk dokumentálására szolgál.
+### Helyi demó
+
+Ha nincs megadva környezeti változó, az alkalmazás automatikusan helyi demómódban indul. Az állapot az adott böngésző `localStorage` tárhelyén marad meg.
+
+### Supabase pilot-adapter
+
+A kliensben előkészített adapter a következő értékeket használja:
+
+```text
+NEXT_PUBLIC_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY
+NEXT_PUBLIC_DEMO_WORKSPACE_ID
+```
+
+A minimális pilot tábla leírása: `docs/supabase-pilot.sql`.
+
+Fontos korlát: a Supabase-adapter csak megfelelően beállított Supabase Auth és sor-szintű hozzáférési szabályok mellett használható biztonságosan. Az anon kulcs nem titok, ezért önmagában nem jogosultságkezelés. Éles személyes adatot a demó-RLS ellenőrzése nélkül ne tölts fel.
+
+## E-mail és külső naptár
+
+A demó nem küld valódi e-mailt vagy SMS-t, és nem ír külső naptárba. A felületen interaktív előnézet és helyi naptárszimuláció működik. A `.env.example` tartalmazza a későbbi szerveroldali e-mail-adapterhez fenntartott változókat, de a kliens nem használja és nem jeleníti meg ezeket.
+
+## Jogosultság és adatvédelem
+
+A privát telepítés hozzáférését a hostingplatform szabályozza. A kezelőfelület jelszó nélküli demómód, nem kész, alkalmazásszintű hitelesítési rendszer. Éles pilot előtt szükséges:
+
+- Supabase Auth vagy más támogatott hitelesítés;
+- tulajdonosi és munkatársi jogosultság szerveroldali ellenőrzése;
+- jogász által ellenőrzött adatkezelési tájékoztató;
+- mentés, auditnapló, spamvédelem és fájlellenőrzés;
+- normalizált ügyfél-, ajánlat- és eseménytáblák.
+
+## Demóhasználat
+
+1. A nyilvános oldalon küldj be fiktív ajánlatkérést.
+2. Nyisd meg a „Demó kezelőfelületet”.
+3. Kattints egy áttekintőkártyára a szűrt listához.
+4. Készíts vagy módosíts ajánlatot.
+5. Állítsd „Kiküldött” állapotba, majd nézd meg az e-mail-előnézetet és a létrejött utánkövetéseket.
+6. Próbáld ki a Naptár és Munkanap menüpontot.
+7. A Beállítások oldalon bármikor visszaállíthatod a fiktív adatokat.

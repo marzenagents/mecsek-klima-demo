@@ -28,18 +28,25 @@ test("a Mecsek Klíma oldal sikeresen kiszolgálható", async () => {
 });
 
 test("a projekt nem tartalmazza az ideiglenes kezdőnézetet", async () => {
-  const [page, layout, packageJson] = await Promise.all([
+  const [page, layout, packageJson, dataStore] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../app/data-store.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(page, /localStorage/);
+  assert.match(page, /createPilotDataAdapter/);
   assert.match(page, /Ajánlat elküldve/);
   assert.match(page, /CallbackModal/);
   assert.match(page, /createMissingFollowups/);
   assert.match(page, /Feladat létrehozása/);
   assert.match(page, /Elvesztési ok/);
   assert.match(page, /computeReportMetrics/);
+  assert.match(page, /overviewCards/);
+  assert.match(page, /OfferEditor/);
+  assert.match(page, /CalendarView/);
+  assert.match(page, /WorkdayView/);
+  assert.match(dataStore, /localStorage/);
+  assert.match(dataStore, /SupabasePilotAdapter/);
   assert.match(layout, /lang="hu"/);
   assert.match(layout, /og\.png/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
