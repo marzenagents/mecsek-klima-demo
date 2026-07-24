@@ -5,15 +5,18 @@
 ## Fő funkciók
 
 - mobilbarát nyilvános kezdőoldal;
+- külön, egy percen belül kitölthető gyors visszahívási űrlap;
 - ötlépéses, feltételes ajánlatkérő;
+- mezőszintű magyar validáció és akadálymentes hibaüzenetek;
 - helyi visszaigazolás- és időpontfoglalás-szimuláció;
 - vállalkozói irányítópult;
 - kereshető és szűrhető érdeklődőlista;
 - módosítható státuszok, jegyzetek és eseményidővonal;
-- mai, lejárt és következő heti feladatok;
-- automatikus 3 és 7 napos ajánlat-utánkövetés;
-- fiktív kimutatások és értékesítési folyamat;
-- vezetett demóbemutató;
+- kézzel létrehozható, elvégezhető és elhalasztható következő feladatok;
+- duplikációmentes automatikus 3 és 7 napos ajánlat-utánkövetés;
+- ajánlati várakozási idő, utolsó kapcsolat és elvesztési ok kezelése;
+- az aktuális rekordokból dinamikusan számolt kimutatások;
+- nyolclépéses, előre kitöltött vezetett demóbemutató;
 - böngészőben megmaradó adatok és visszaállítási lehetőség.
 
 ## Helyi futtatás

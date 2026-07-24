@@ -35,8 +35,11 @@ test("a projekt nem tartalmazza az ideiglenes kezdőnézetet", async () => {
   ]);
   assert.match(page, /localStorage/);
   assert.match(page, /Ajánlat elküldve/);
-  assert.match(page, /addDays\(3\)/);
-  assert.match(page, /addDays\(7\)/);
+  assert.match(page, /CallbackModal/);
+  assert.match(page, /createMissingFollowups/);
+  assert.match(page, /Feladat létrehozása/);
+  assert.match(page, /Elvesztési ok/);
+  assert.match(page, /computeReportMetrics/);
   assert.match(layout, /lang="hu"/);
   assert.match(layout, /og\.png/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
