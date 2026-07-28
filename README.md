@@ -8,6 +8,8 @@ Magyar nyelvű, mobilbarát webalkalmazás-demó klíma- és hőszivattyú-szere
 
 - többlépéses ajánlatkérő és gyors visszahívási kérés;
 - dinamikus, kattintható admin áttekintőkártyák;
+- kilencoszlopos értékesítési Kanban húzással és akadálymentes státuszválasztóval;
+- 11 lépéses, végigvezetett interaktív demóbemutató;
 - URL-ben tárolt szűrt navigáció és működő böngésző-visszalépés;
 - érdeklődő-, feladat-, státusz- és utánkövetés-kezelés;
 - szerkeszthető, nyomtatható/PDF-be menthető árajánlat;
@@ -29,6 +31,13 @@ npm run dev
 ```
 
 A fejlesztői kiszolgáló által kiírt helyi címet nyisd meg a böngészőben.
+
+Egy elkészült build egyszerű helyi előnézetéhez:
+
+```powershell
+npm run build
+npm run preview:local
+```
 
 ## Ellenőrzések
 

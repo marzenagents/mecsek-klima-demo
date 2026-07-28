@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  attentionSummary,
   calculateOfferTotals,
   calendarEntriesConflict,
   dashboardHash,
+  KANBAN_COLUMNS,
+  kanbanColumnForStatus,
   overviewCards,
   parseDashboardHash,
+  rankTasks,
+  salesSummary,
 } from "../app/pilot-model.ts";
 
 const lead = (status = "Új") => ({
@@ -59,6 +64,40 @@ test("az admin URL megőrzi és visszaolvassa az aktív szűrést", () => {
     filter: { scope: "lead", value: "Új", label: "Új érdeklődők" },
   });
   assert.equal(parseDashboardHash("#ismeretlen"), null);
+  assert.deepEqual(parseDashboardHash(dashboardHash("Kanban")), { section: "Kanban", filter: null });
+});
+
+test("a Kanban kilenc üzleti oszlopa minden fontos státuszt lefed", () => {
+  assert.equal(KANBAN_COLUMNS.length, 9);
+  assert.equal(kanbanColumnForStatus("Visszahívandó"), "Visszahívás");
+  assert.equal(kanbanColumnForStatus("Nem releváns"), null);
+});
+
+test("a teendőranglista a prioritást, lejáratot és értéket együtt kezeli", () => {
+  const leads = [lead("Új"), { ...lead("Új"), id: "MK-2", value: 2500000 }];
+  const ranked = rankTasks([
+    { id: "T-1", leadId: "MK-Új", type: "Visszahívás", due: "2026-07-23", priority: "Magas", done: false },
+    { id: "T-2", leadId: "MK-2", type: "Ajánlat", due: "2026-07-24", priority: "Közepes", done: false },
+  ], leads, "2026-07-24");
+  assert.equal(ranked[0].task.id, "T-1");
+});
+
+test("a figyelmeztetések és értékesítési összefoglaló az aktuális adatokból számol", () => {
+  const sent = { ...lead("Ajánlat elküldve"), owner: "", nextAction: "", lastContactAt: "2026-07-18" };
+  const attention = attentionSummary([sent], [], "2026-07-24");
+  assert.equal(attention.withoutOwner, 1);
+  assert.equal(attention.withoutNextStep, 1);
+  assert.equal(attention.offersWithoutFollowup, 1);
+
+  const offer = {
+    id: "AJ-1", leadId: sent.id, createdAt: "2026-07-20", validUntil: "2026-08-01", status: "Kiküldött",
+    lines: [{ id: "L-1", name: "Szerelés", kind: "Munkadíj", quantity: 1, unitPrice: 100000 }],
+    discountPercent: 0, vatPercent: 27, notes: "", paymentTerms: "",
+  };
+  const summary = salesSummary([sent, lead("Megnyert")], [offer]);
+  assert.equal(summary.openOfferCount, 1);
+  assert.equal(summary.openOfferValue, 127000);
+  assert.equal(summary.estimatedConversionRate, 100);
 });
 
 test("az ajánlat nettó, áfa- és bruttó összege helyesen számolódik", () => {

@@ -92,6 +92,7 @@ export type DashboardFilter =
 export type DashboardSection =
   | "Áttekintés"
   | "Érdeklődők"
+  | "Kanban"
   | "Mai feladatok"
   | "Ajánlatok"
   | "Naptár"
@@ -102,6 +103,7 @@ export type DashboardSection =
 const SECTION_SLUGS: Record<DashboardSection, string> = {
   "Áttekintés": "attekintes",
   "Érdeklődők": "erdeklodok",
+  "Kanban": "kanban",
   "Mai feladatok": "feladatok",
   "Ajánlatok": "ajanlatok",
   "Naptár": "naptar",
@@ -109,6 +111,101 @@ const SECTION_SLUGS: Record<DashboardSection, string> = {
   "Kimutatások": "kimutatasok",
   "Beállítások": "beallitasok",
 };
+
+export const KANBAN_COLUMNS = [
+  { label: "Új", status: "Új" },
+  { label: "Visszahívás", status: "Visszahívandó" },
+  { label: "Kapcsolatfelvétel", status: "Kapcsolatfelvétel megtörtént" },
+  { label: "Felmérés", status: "Felmérés egyeztetve" },
+  { label: "Ajánlat készül", status: "Ajánlat készül" },
+  { label: "Ajánlat elküldve", status: "Ajánlat elküldve" },
+  { label: "Utánkövetés", status: "Utánkövetés szükséges" },
+  { label: "Megnyert", status: "Megnyert" },
+  { label: "Elvesztett", status: "Elvesztett" },
+] as const satisfies ReadonlyArray<{ label: string; status: Lead["status"] }>;
+
+export type KanbanColumnLabel = (typeof KANBAN_COLUMNS)[number]["label"];
+
+export function kanbanColumnForStatus(status: Lead["status"]) {
+  return KANBAN_COLUMNS.find((column) => column.status === status)?.label ?? null;
+}
+
+export function rankTasks(tasks: Task[], leads: Lead[], currentDate: string) {
+  const priorityWeight = { Magas: 3, Közepes: 2, Alacsony: 1 };
+  return tasks
+    .filter((task) => !task.done)
+    .map((task) => {
+      const lead = leads.find((item) => item.id === task.leadId);
+      const overdueDays = Math.max(
+        0,
+        Math.floor(
+          (new Date(`${currentDate}T12:00:00`).getTime() - new Date(`${task.due}T12:00:00`).getTime()) /
+            86_400_000,
+        ),
+      );
+      const score =
+        priorityWeight[task.priority] * 10_000_000 +
+        overdueDays * 1_000_000 +
+        Math.max(0, lead?.value ?? 0);
+      return { task, lead, score };
+    })
+    .sort((a, b) => b.score - a.score || a.task.due.localeCompare(b.task.due));
+}
+
+export function attentionSummary(leads: Lead[], tasks: Task[], currentDate: string) {
+  const openStatuses = ["Új", "Visszahívandó", "Kapcsolatfelvétel megtörtént", "Felmérés egyeztetve", "Ajánlat készül", "Ajánlat elküldve", "Utánkövetés szükséges"];
+  const activeTasks = tasks.filter((task) => !task.done);
+  const unansweredBefore = new Date(`${currentDate}T12:00:00`);
+  unansweredBefore.setDate(unansweredBefore.getDate() - 3);
+  const unansweredLimit = unansweredBefore.toISOString().slice(0, 10);
+  return {
+    overdueTasks: activeTasks.filter((task) => task.due < currentDate).length,
+    withoutOwner: leads.filter((lead) => openStatuses.includes(lead.status) && !lead.owner.trim()).length,
+    withoutNextStep: leads.filter(
+      (lead) =>
+        openStatuses.includes(lead.status) &&
+        (!lead.nextAction.trim() || !activeTasks.some((task) => task.leadId === lead.id)),
+    ).length,
+    offersWithoutFollowup: leads.filter(
+      (lead) =>
+        ["Ajánlat elküldve", "Utánkövetés szükséges"].includes(lead.status) &&
+        !activeTasks.some((task) => task.leadId === lead.id && Boolean(task.followupKey)),
+    ).length,
+    unansweredLeads: leads.filter(
+      (lead) =>
+        ["Új", "Visszahívandó"].includes(lead.status) &&
+        (lead.lastContactAt ?? lead.createdAt) < unansweredLimit,
+    ).length,
+  };
+}
+
+export function salesSummary(leads: Lead[], offers: Offer[]) {
+  const openOffers = offers.filter((offer) =>
+    ["Kiküldött", "Megtekintett", "Jóváhagyásra vár"].includes(offer.status),
+  );
+  const won = leads.filter((lead) => lead.status === "Megnyert");
+  const closed = leads.filter((lead) => ["Megnyert", "Elvesztett"].includes(lead.status));
+  const responseDays = leads
+    .map((lead) => {
+      if (!lead.lastContactAt) return null;
+      return Math.max(
+        0,
+        (new Date(`${lead.lastContactAt}T12:00:00`).getTime() -
+          new Date(`${lead.createdAt}T12:00:00`).getTime()) /
+          86_400_000,
+      );
+    })
+    .filter((value): value is number => value !== null);
+  return {
+    openOfferCount: openOffers.length,
+    openOfferValue: openOffers.reduce((sum, offer) => sum + calculateOfferTotals(offer).gross, 0),
+    wonValue: won.reduce((sum, lead) => sum + lead.value, 0),
+    averageFirstResponseDays: responseDays.length
+      ? Math.round((responseDays.reduce((sum, value) => sum + value, 0) / responseDays.length) * 10) / 10
+      : null,
+    estimatedConversionRate: closed.length ? Math.round((won.length / closed.length) * 100) : null,
+  };
+}
 
 const SLUG_SECTIONS = Object.fromEntries(
   Object.entries(SECTION_SLUGS).map(([section, slug]) => [slug, section]),

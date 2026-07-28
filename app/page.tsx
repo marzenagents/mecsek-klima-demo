@@ -16,11 +16,15 @@ import {
 } from "./demo-logic";
 import { createPilotDataAdapter, type DataMode, type PilotDataAdapter } from "./data-store";
 import {
+  attentionSummary,
   calculateOfferTotals,
   calendarEntriesConflict,
   dashboardHash,
+  KANBAN_COLUMNS,
   overviewCards,
   parseDashboardHash,
+  rankTasks,
+  salesSummary,
   type CalendarEntry,
   type CommunicationLog,
   type CompanySettings,
@@ -232,6 +236,12 @@ function nextLeadId(leads: Lead[]) {
 
 function money(value: number) {
   return new Intl.NumberFormat("hu-HU", { style: "currency", currency: "HUF", maximumFractionDigits: 0 }).format(value);
+}
+
+function huDate(value: string) {
+  if (!value) return "Nincs megadva";
+  return new Intl.DateTimeFormat("hu-HU", { year: "numeric", month: "short", day: "numeric" })
+    .format(new Date(`${value}T12:00:00`));
 }
 
 export default function Home() {
@@ -543,13 +553,15 @@ export default function Home() {
       timeline: [`${today()} • Státusz: ${status}`, ...lead.timeline],
     };
     setLeads((prev) => prev.map((item) => item.id === lead.id ? updated : item));
-    setSelected(updated);
+    setSelected((current) => current?.id === lead.id ? updated : current);
     if (status === "Ajánlat elküldve") {
       setTasks((prev) => {
         const generated = createMissingFollowups(prev, lead.id, offerSentAt ?? today());
         showToast(generated.length ? `${generated.length} utánkövetési feladat létrejött.` : "Az utánkövetési feladatok már léteznek.");
         return generated.length ? [...generated, ...prev] : prev;
       });
+    } else {
+      showToast(`A státusz módosítva: ${status}.`);
     }
   };
 
@@ -764,9 +776,20 @@ export default function Home() {
   };
 
   const startTour = () => {
+    const previousDemoIds = new Set(leads.filter((lead) => lead.source === "Vezetett demó").map((lead) => lead.id));
+    if (previousDemoIds.size) {
+      setLeads((previous) => previous.filter((lead) => !previousDemoIds.has(lead.id)));
+      setTasks((previous) => previous.filter((task) => !previousDemoIds.has(task.leadId)));
+      setOffers((previous) => previous.filter((offer) => !previousDemoIds.has(offer.leadId)));
+      setCalendar((previous) => previous.filter((entry) => !previousDemoIds.has(entry.leadId)));
+      setCommunications((previous) => previous.filter((message) => !previousDemoIds.has(message.leadId)));
+    }
     setMode("public");
     setPublicView("home");
+    setSelected(null);
+    setDashboardFilter(null);
     setCallbackLead(null);
+    setMessagePreview(null);
     setCallbackForm({
       name: "Minta Márton",
       phone: "+36 30 123 4567",
@@ -786,26 +809,67 @@ export default function Home() {
       if (submitCallback(true)) setTour(2);
     } else if (tour === 2) {
       setCallbackOpen(false);
-      setMode("dashboard");
-      setSection("Érdeklődők");
+      navigateDashboard("Áttekintés");
       setTour(3);
     } else if (tour === 3 && currentTourLead) {
       setSelected(currentTourLead);
       setTour(4);
     } else if (tour === 4 && currentTourLead) {
-      createTask(currentTourLead, { ...DEFAULT_TASK_FORM, type: "Helyszíni felmérés egyeztetése", due: addDays(1), note: "A vezetett demó által létrehozott fiktív feladat." });
+      updateLead(currentTourLead.id, (lead) => ({ ...lead, owner: "Dóra", timeline: [`${today()} • Felelős: Dóra`, ...lead.timeline] }));
+      if (!tasks.some((task) => task.leadId === currentTourLead.id && task.type === "Helyszíni felmérés egyeztetése")) {
+        createTask(currentTourLead, { ...DEFAULT_TASK_FORM, type: "Helyszíni felmérés egyeztetése", due: addDays(1), owner: "Dóra", note: "A vezetett demó fiktív feladata." });
+      }
       setTour(5);
     } else if (tour === 5 && currentTourLead) {
-      changeStatus(currentTourLead, "Ajánlat elküldve");
-      setTour(6);
-    } else if (tour === 6) {
+      saveCalendarEntry({
+        id: `CAL-DEMO-${currentTourLead.id}`,
+        leadId: currentTourLead.id,
+        title: `Felmérés – ${currentTourLead.name}`,
+        type: "Helyszíni felmérés",
+        date: addDays(1),
+        time: "11:30",
+        duration: 60,
+        owner: "Dóra",
+        address: currentTourLead.city,
+        notes: "Vezetett demó – fiktív időpont.",
+      });
       setSelected(null);
-      setSection("Mai feladatok");
+      navigateDashboard("Naptár");
+      setTour(6);
+    } else if (tour === 6 && currentTourLead) {
+      saveOffer({
+        id: `AJ-DEMO-${currentTourLead.id}`,
+        leadId: currentTourLead.id,
+        createdAt: today(),
+        validUntil: addDays(company.offerValidityDays),
+        status: "Piszkozat",
+        lines: [
+          { id: `L-DEMO-1-${currentTourLead.id}`, name: "Inverteres klímaberendezés", kind: "Anyag", quantity: 2, unitPrice: 285000 },
+          { id: `L-DEMO-2-${currentTourLead.id}`, name: "Alapszerelés", kind: "Munkadíj", quantity: 2, unitPrice: 85000 },
+        ],
+        discountPercent: 0,
+        vatPercent: 27,
+        notes: "Vezetett demó – előzetes, fiktív ajánlat.",
+        paymentTerms: company.paymentTerms,
+      });
+      navigateDashboard("Ajánlatok");
       setTour(7);
-    } else if (tour === 7) {
-      setSection("Kimutatások");
+    } else if (tour === 7 && currentTourLead) {
+      const demoOffer = offers.find((offer) => offer.id === `AJ-DEMO-${currentTourLead.id}`);
+      if (demoOffer) changeOfferStatus(demoOffer, "Kiküldött");
       setTour(8);
+    } else if (tour === 8) {
+      setMessagePreview(null);
+      navigateDashboard("Mai feladatok", { scope: "task", value: "followup", label: "Automatikus utánkövetések" });
+      setTour(9);
+    } else if (tour === 9) {
+      navigateDashboard("Kanban");
+      setTour(10);
+    } else if (tour === 10) {
+      navigateDashboard("Kimutatások");
+      setTour(11);
     } else {
+      setMessagePreview(null);
       setTour(0);
     }
   };
@@ -853,14 +917,19 @@ export default function Home() {
           calendar={calendar} saveCalendarEntry={saveCalendarEntry} company={company} setCompany={setCompany}
           communications={communications} setMessagePreview={setMessagePreview} dataMode={dataMode}
           exportPilotData={exportPilotData} showToast={showToast} addQuickNote={addQuickNote}
-          demoRole={demoRole} setDemoRole={setDemoRole}
+          demoRole={demoRole} setDemoRole={setDemoRole} changeStatus={changeStatus} loaded={loaded}
         />
       )}
       {selected && (
         <LeadDrawer lead={selected} close={() => setSelected(null)} changeStatus={changeStatus}
           setLossReason={setLossReason} createTask={createTask}
           note={note} setNote={setNote} addNote={addNote} deleteLead={deleteLead}
-          tasks={tasks.filter((task) => task.leadId === selected.id && !task.done)} />
+          tasks={tasks.filter((task) => task.leadId === selected.id && !task.done)}
+          offers={offers.filter((offer) => offer.leadId === selected.id)}
+          calendar={calendar.filter((entry) => entry.leadId === selected.id)}
+          communications={communications.filter((message) => message.leadId === selected.id)}
+          openCalendar={() => { setSelected(null); navigateDashboard("Naptár"); }}
+          openOffers={() => { setSelected(null); navigateDashboard("Ajánlatok"); }} />
       )}
       {booking && <Booking close={() => setBooking(false)} confirm={() => { setBooking(false); showToast("A demó időpontfoglalás rögzítve."); }} />}
       {callbackOpen && <CallbackModal
@@ -882,22 +951,25 @@ export default function Home() {
       )}
       {tour > 0 && (
         <div className="tour-card" role="dialog" aria-modal="false" aria-live="polite" aria-label="Vezetett demóbemutató">
-          <span>{tour}/8</span>
+          <span>{tour}/11</span>
           <strong>{[
             "",
-            "1. Előre kitöltött gyors visszahívás",
-            "2. Az érdeklődő és a visszahívási feladat létrejött",
-            "3. Az új érdeklődő azonnal megjelent",
-            "4. Az adatlap minden következő lépést egy helyen mutat",
-            "5. Kézi feladat is hozzáadható",
-            "6. Az ajánlat után automatikus a 3 és 7 napos követés",
-            "7. A napi lista megakadályozza az elfelejtést",
-            "8. A kimutatás minden adatból újraszámol",
+            "1. Új visszahívási igény érkezik",
+            "2. Az automatikus visszaigazolás azonnal látható",
+            "3. Az érdeklődő megjelenik az áttekintésben",
+            "4. Az ügyféladatlap egy helyre rendezi a fontos adatokat",
+            "5. Felelőst és következő feladatot rendelünk hozzá",
+            "6. Felmérési időpont kerül a naptárba",
+            "7. Elkészül egy tételes, fiktív ajánlat",
+            "8. Az ajánlatot kiküldött állapotba helyezzük",
+            "9. Létrejön a 3 és 7 napos utánkövetés",
+            "10. A Kanban áttekinthetővé teszi az értékesítést",
+            "11. A kimutatások minden változást újraszámolnak",
           ][tour]}</strong>
-          <p>{tour === 8
-            ? `A rendszer célja, hogy minden érdeklődőnek legyen felelőse, státusza és következő lépése. Jelenleg ${computeReportMetrics(leads, tasks).waitingFollowupCount} ajánlat vár utánkövetésre, összesen ${money(computeReportMetrics(leads, tasks).waitingFollowupValue)} becsült értékben.`
+          <p>{tour === 11
+            ? `A rendszer célja, hogy minden érdeklődőnek legyen felelőse, státusza és következő lépése – így kevesebb megkeresés és kiküldött ajánlat marad utánkövetés nélkül. Jelenleg ${computeReportMetrics(leads, tasks).waitingFollowupCount} ajánlat vár követésre, ${money(computeReportMetrics(leads, tasks).waitingFollowupValue)} becsült értékben.`
             : "A Tovább gomb a következő működő lépést is végrehajtja fiktív adatokkal."}</p>
-          <div><button className="button-ghost" onClick={() => { setTour(0); setCallbackOpen(false); }}>Bezárás</button><button className="button-primary" onClick={tourNext}>{tour === 8 ? "Befejezés" : "Tovább"}</button></div>
+          <div><button className="button-ghost" onClick={() => { setTour(0); setCallbackOpen(false); setMessagePreview(null); }}>Megszakítás</button><button className="button-primary" onClick={tourNext}>{tour === 11 ? "Befejezés" : "Tovább"}</button></div>
         </div>
       )}
       {toast && <div className="toast" role="status">{toast}</div>}
@@ -1114,14 +1186,18 @@ type DashboardProps = {
   addQuickNote: (leadId: string, text: string) => void;
   demoRole: "Tulajdonos" | "Munkatárs";
   setDemoRole: (role: "Tulajdonos" | "Munkatárs") => void;
+  changeStatus: (lead: Lead, status: LeadStatus) => void;
+  loaded: boolean;
 };
 
 function Dashboard(props: DashboardProps) {
   const { section, navigate, setMode, leads, tasks, setSelected } = props;
+  const [moreOpen, setMoreOpen] = useState(false);
   const activeTasks = tasks.filter((task) => !task.done);
   const allNav: [DashboardSection, string][] = [
     ["Áttekintés", "⌂"],
     ["Érdeklődők", "◎"],
+    ["Kanban", "▥"],
     ["Mai feladatok", "□"],
     ["Ajánlatok", "₣"],
     ["Naptár", "▦"],
@@ -1143,8 +1219,10 @@ function Dashboard(props: DashboardProps) {
       </aside>
       <div className="dashboard-main">
         <header className="dashboard-header"><div><span className="mobile-demo">Demó kezelőfelület</span><h1>{section}</h1><p>{section === "Áttekintés" ? "A mai nap legfontosabb ügyfélfolyamatai egy helyen." : "Minden megjelenített adat fiktív."}</p></div><div className="user-chip role-switch"><span>{props.demoRole === "Tulajdonos" ? "BM" : "DN"}</span><div><strong>{props.demoRole === "Tulajdonos" ? "Bálint Márk" : "Dóra Nagy"}</strong><select aria-label="Demó szerepkör" value={props.demoRole} onChange={(event) => { const role = event.target.value as "Tulajdonos" | "Munkatárs"; props.setDemoRole(role); if (role === "Munkatárs" && section === "Beállítások") navigate("Áttekintés"); }}><option>Tulajdonos</option><option>Munkatárs</option></select></div></div></header>
-        {section === "Áttekintés" && <Overview leads={leads} tasks={activeTasks} openLead={setSelected} navigate={navigate} />}
+        {!props.loaded && <div className="dashboard-content"><div className="loading-state" role="status"><span /><strong>Demóadatok betöltése…</strong></div></div>}
+        {props.loaded && section === "Áttekintés" && <Overview leads={leads} tasks={activeTasks} offers={props.offers} openLead={setSelected} navigate={navigate} />}
         {section === "Érdeklődők" && <LeadList {...props} />}
+        {section === "Kanban" && <KanbanBoard leads={leads} tasks={tasks} openLead={setSelected} changeStatus={props.changeStatus} />}
         {section === "Mai feladatok" && <TaskList tasks={tasks} leads={leads} filter={props.dashboardFilter} clearFilter={props.clearDashboardFilter} completeTask={props.completeTask} postponeTask={props.postponeTask} openLead={setSelected} />}
         {section === "Ajánlatok" && <Offers leads={leads} offers={props.offers} filter={props.dashboardFilter} clearFilter={props.clearDashboardFilter} openLead={setSelected} saveOffer={props.saveOffer} changeOfferStatus={props.changeOfferStatus} duplicateOffer={props.duplicateOffer} company={props.company} />}
         {section === "Naptár" && <CalendarView leads={leads} entries={props.calendar} company={props.company} saveEntry={props.saveCalendarEntry} openLead={setSelected} />}
@@ -1152,6 +1230,27 @@ function Dashboard(props: DashboardProps) {
         {section === "Kimutatások" && <Reports leads={leads} tasks={tasks} offers={props.offers} />}
         {section === "Beállítások" && <Settings resetDemo={props.resetDemo} company={props.company} setCompany={props.setCompany} communications={props.communications} setMessagePreview={props.setMessagePreview} dataMode={props.dataMode} exportPilotData={props.exportPilotData} />}
       </div>
+      <nav className="mobile-bottom-nav" aria-label="Mobil admin navigáció">
+        {([
+          ["Áttekintés", "⌂"],
+          ["Érdeklődők", "◎"],
+          ["Munkanap", "☀"],
+          ["Kanban", "▥"],
+        ] as [DashboardSection, string][]).map(([name, icon]) => (
+          <button key={name} className={section === name ? "active" : ""} onClick={() => { setMoreOpen(false); navigate(name); }}>
+            <span>{icon}</span><small>{name}</small>
+          </button>
+        ))}
+        <button aria-expanded={moreOpen} aria-controls="mobile-more-menu" onClick={() => setMoreOpen((value) => !value)}>
+          <span>•••</span><small>Továbbiak</small>
+        </button>
+      </nav>
+      {moreOpen && <div className="mobile-more-menu" id="mobile-more-menu">
+        {(["Mai feladatok", "Ajánlatok", "Naptár", "Kimutatások", "Beállítások"] as DashboardSection[])
+          .filter((name) => props.demoRole === "Tulajdonos" || name !== "Beállítások")
+          .map((name) => <button key={name} onClick={() => { setMoreOpen(false); navigate(name); }}>{name}</button>)}
+        <button onClick={() => { setMoreOpen(false); setMode("public"); }}>Nyilvános oldal</button>
+      </div>}
     </div>
   );
 }
@@ -1161,13 +1260,86 @@ function ActiveFilter({ filter, clear }: { filter: DashboardFilter; clear: () =>
   return <div className="active-filter" role="status"><span>Aktív szűrés: <strong>{filter.label}</strong></span><button onClick={clear}>Szűrés törlése ×</button></div>;
 }
 
-function Overview({ leads, tasks, openLead, navigate }: {
+function KanbanBoard({ leads, tasks, openLead, changeStatus }: {
   leads: Lead[];
   tasks: Task[];
+  openLead: (lead: Lead) => void;
+  changeStatus: (lead: Lead, status: LeadStatus) => void;
+}) {
+  const [draggedId, setDraggedId] = useState("");
+  const visibleLeads = leads.filter((lead) => lead.status !== "Nem releváns");
+  const moveLead = (leadId: string, status: LeadStatus) => {
+    const lead = leads.find((item) => item.id === leadId);
+    if (lead && lead.status !== status) changeStatus(lead, status);
+    setDraggedId("");
+  };
+  return <div className="dashboard-content kanban-page">
+    <div className="section-actions"><div><h2>Értékesítési Kanban</h2><p>Húzd át a kártyát, vagy válassz új státuszt a kártyán. A módosítás minden adminnézetben megjelenik.</p></div><span className="tag">{visibleLeads.length} érdeklődő</span></div>
+    <div className="kanban-scroll" role="region" aria-label="Érdeklődők értékesítési Kanban-nézete" tabIndex={0}>
+      <div className="kanban-board">
+        {KANBAN_COLUMNS.map((column) => {
+          const columnLeads = visibleLeads.filter((lead) => lead.status === column.status);
+          const columnValue = columnLeads.reduce((sum, lead) => sum + lead.value, 0);
+          return <section
+            className={`kanban-column ${draggedId ? "drag-active" : ""}`}
+            key={column.label}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => { event.preventDefault(); moveLead(event.dataTransfer.getData("text/plain") || draggedId, column.status); }}
+            aria-label={`${column.label}, ${columnLeads.length} érdeklődő`}
+          >
+            <header><span>{column.label}</span><b>{columnLeads.length}</b><small>{money(columnValue)}</small></header>
+            <div className="kanban-stack">
+              {columnLeads.length ? columnLeads.map((lead) => {
+                const leadTasks = tasks.filter((task) => task.leadId === lead.id && !task.done);
+                const nextTask = leadTasks.sort((a, b) => a.due.localeCompare(b.due))[0];
+                const overdue = leadTasks.some((task) => task.due < today());
+                return <article
+                  className={`kanban-card ${overdue ? "overdue" : ""}`}
+                  key={lead.id}
+                  draggable
+                  onDragStart={(event) => { setDraggedId(lead.id); event.dataTransfer.setData("text/plain", lead.id); event.dataTransfer.effectAllowed = "move"; }}
+                  onDragEnd={() => setDraggedId("")}
+                >
+                  <button className="kanban-open" onClick={() => openLead(lead)}>
+                    <span><strong>{lead.name}</strong><small>{lead.city}</small></span><b aria-hidden="true">›</b>
+                  </button>
+                  <p>{lead.service}</p>
+                  <div className="kanban-meta"><span><i className={`priority ${lead.priority.toLowerCase()}`} />{lead.priority}</span><strong>{money(lead.value)}</strong></div>
+                  {overdue && <div className="kanban-warning" role="status">! Lejárt feladat</div>}
+                  <dl>
+                    <div><dt>Következő feladat</dt><dd>{nextTask?.type ?? (lead.nextAction || "Nincs")}</dd></div>
+                    <div><dt>Kapcsolat</dt><dd>{nextTask ? huDate(nextTask.due) : huDate(lead.nextDate)}</dd></div>
+                    <div><dt>Felelős</dt><dd>{lead.owner || "Nincs kijelölve"}</dd></div>
+                  </dl>
+                  <label><span>Áthelyezés</span><select aria-label={`${lead.name} státuszának módosítása`} value={lead.status} onChange={(event) => moveLead(lead.id, event.target.value as LeadStatus)}>{KANBAN_COLUMNS.map((target) => <option value={target.status} key={target.status}>{target.label}</option>)}</select></label>
+                </article>;
+              }) : <div className="kanban-empty">Nincs érdeklődő ebben a szakaszban.</div>}
+            </div>
+          </section>;
+        })}
+      </div>
+    </div>
+  </div>;
+}
+
+function Overview({ leads, tasks, offers, openLead, navigate }: {
+  leads: Lead[];
+  tasks: Task[];
+  offers: Offer[];
   openLead: (lead: Lead) => void;
   navigate: (section: DashboardSection, filter?: DashboardFilter) => void;
 }) {
   const cards = overviewCards(leads, tasks, today());
+  const topTasks = rankTasks(tasks, leads, today()).slice(0, 3);
+  const attention = attentionSummary(leads, tasks, today());
+  const sales = salesSummary(leads, offers);
+  const attentionItems = [
+    ["Lejárt feladatok", attention.overdueTasks, "Mai feladatok", { scope: "task", value: "overdue", label: "Lejárt feladatok" }],
+    ["Felelős nélküli érdeklődők", attention.withoutOwner, "Érdeklődők", null],
+    ["Következő lépés nélkül", attention.withoutNextStep, "Érdeklődők", null],
+    ["Utánkövetés nélküli ajánlatok", attention.offersWithoutFollowup, "Mai feladatok", { scope: "task", value: "followup", label: "Utánkövetésre várók" }],
+    ["3 napnál régebbi megkeresések", attention.unansweredLeads, "Érdeklődők", null],
+  ] as [string, number, DashboardSection, DashboardFilter][];
   return <div className="dashboard-content">
     <div className="overview-groups" aria-label="Kiemelt ügyfélfolyamatok">
       {["Beérkező munkák", "Aktív értékesítés", "Eredmények", "Figyelmeztetések"].map((group) => (
@@ -1189,6 +1361,33 @@ function Overview({ leads, tasks, openLead, navigate }: {
         </section>
       ))}
     </div>
+    <div className="overview-focus-grid">
+      <section className="panel priority-panel">
+        <div className="panel-title"><div><h2>Mai három legfontosabb teendő</h2><p>Prioritás, határidő és becsült érték alapján</p></div><button onClick={() => navigate("Mai feladatok")}>Minden feladat →</button></div>
+        {topTasks.length ? topTasks.map(({ task, lead }, index) => (
+          <button className="priority-task" key={task.id} onClick={() => lead && openLead(lead)}>
+            <b>{index + 1}</b><span><strong>{task.type}</strong><small>{lead?.name ?? "Ismeretlen ügyfél"} • {lead?.city ?? "—"}</small></span>
+            <span><small>{task.due < today() ? "Lejárt" : task.due === today() ? "Ma" : task.due}</small><strong>{lead ? money(lead.value) : "—"}</strong></span>
+          </button>
+        )) : <div className="empty-state small"><strong>Nincs aktív feladat</strong><p>A rendszer itt emeli ki a következő legfontosabb lépéseket.</p></div>}
+      </section>
+      <section className="panel attention-panel">
+        <div className="panel-title"><div><h2>Figyelmet igényel</h2><p>Hiányzó vagy késésben lévő következő lépések</p></div></div>
+        {attentionItems.map(([label, value, target, filter]) => (
+          <button key={label} onClick={() => navigate(target, filter)}><span>{label}</span><strong className={value ? "has-warning" : ""}>{value}</strong></button>
+        ))}
+      </section>
+    </div>
+    <section className="panel sales-summary">
+      <div className="panel-title"><div><h2>Értékesítési összefoglaló</h2><p>Az aktuális fiktív demóadatokból számolva</p></div><button onClick={() => navigate("Kimutatások")}>Kimutatások →</button></div>
+      <div>
+        <article><span>Nyitott ajánlatok</span><strong>{sales.openOfferCount}</strong></article>
+        <article><span>Nyitott ajánlatérték</span><strong>{money(sales.openOfferValue)}</strong></article>
+        <article><span>Megnyert munkák értéke</span><strong>{money(sales.wonValue)}</strong></article>
+        <article><span>Átlagos első válaszidő</span><strong>{sales.averageFirstResponseDays === null ? "Nincs adat" : `${sales.averageFirstResponseDays} nap`}</strong></article>
+        <article><span>Becsült konverzió</span><strong>{sales.estimatedConversionRate === null ? "Nincs adat" : `${sales.estimatedConversionRate}%`}</strong></article>
+      </div>
+    </section>
     <div className="dashboard-columns">
       <section className="panel"><div className="panel-title"><div><h2>Legfrissebb érdeklődők</h2><p>Az utolsó beérkezett megkeresések</p></div><button onClick={() => navigate("Érdeklődők")}>Összes megnyitása →</button></div>
         <div className="compact-list">{leads.slice(0, 6).map((lead) => <button key={lead.id} onClick={() => openLead(lead)}><span className="avatar">{lead.name.split(" ").map((part) => part[0]).join("")}</span><span><strong>{lead.name}</strong><small>{lead.city} • {lead.service}</small></span><Status status={lead.status} /><b>›</b></button>)}</div>
@@ -1460,7 +1659,7 @@ function Settings({ resetDemo, company, setCompany, communications, setMessagePr
   </div>;
 }
 
-function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note, setNote, addNote, deleteLead, tasks }: {
+function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note, setNote, addNote, deleteLead, tasks, offers, calendar, communications, openCalendar, openOffers }: {
   lead: Lead;
   close: () => void;
   changeStatus: (lead: Lead, status: LeadStatus) => void;
@@ -1471,6 +1670,11 @@ function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note
   addNote: () => void;
   deleteLead: (lead: Lead) => void;
   tasks: Task[];
+  offers: Offer[];
+  calendar: CalendarEntry[];
+  communications: CommunicationLog[];
+  openCalendar: () => void;
+  openOffers: () => void;
 }) {
   const [taskForm, setTaskForm] = useState(DEFAULT_TASK_FORM);
   const [taskError, setTaskError] = useState("");
@@ -1494,20 +1698,54 @@ function LeadDrawer({ lead, close, changeStatus, setLossReason, createTask, note
   };
 
   const waitingDays = daysSince(lead.offerSentAt);
+  const silenceDays = daysSince(lead.lastContactAt ?? lead.createdAt);
+  const warnings = [
+    !lead.owner.trim() ? "Nincs kijelölt felelős." : "",
+    !tasks.length ? "Nincs aktív következő feladat." : "",
+    lead.nextDate && lead.nextDate < today() ? `A következő kapcsolatfelvétel lejárt: ${huDate(lead.nextDate)}.` : "",
+    ["Ajánlat elküldve", "Utánkövetés szükséges"].includes(lead.status) && !tasks.some((task) => task.followupKey) ? "A kiküldött ajánlathoz nincs aktív utánkövetés." : "",
+    !lead.phone || !lead.email || !lead.city || !lead.service ? "Fontos kapcsolati vagy igényadat hiányzik." : "",
+    silenceDays !== null && silenceDays >= 3 && !["Megnyert", "Elvesztett", "Nem releváns"].includes(lead.status) ? `${silenceDays} napja nem történt rögzített kapcsolatfelvétel.` : "",
+  ].filter(Boolean);
+  const timeline = Array.from(new Set([
+    ...lead.timeline,
+    ...tasks.map((task) => `${task.due} • Feladat: ${task.type}${task.done ? " (elvégezve)" : ""}`),
+    ...offers.map((offer) => `${offer.sentAt ?? offer.createdAt} • Ajánlat: ${offer.id} – ${offer.status}`),
+    ...calendar.map((entry) => `${entry.date} • Időpont: ${entry.type} ${entry.time}`),
+    ...communications.map((message) => `${message.createdAt.slice(0, 10)} • Kommunikáció: ${message.subject}`),
+  ])).sort((a, b) => b.slice(0, 10).localeCompare(a.slice(0, 10)));
+  const scrollTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
   return <div className="drawer-backdrop" onMouseDown={close}>
     <aside className="lead-drawer" role="dialog" aria-modal="true" aria-labelledby="lead-title" onMouseDown={(event) => event.stopPropagation()}>
       <header><div><span>{lead.id}</span><h2 id="lead-title">{lead.name}</h2><p>{lead.city} • {lead.service}</p></div><button aria-label="Érdeklődő adatlapjának bezárása" onClick={close}>×</button></header>
-      <div className="drawer-status"><label><span>Státusz</span><select value={lead.status} onChange={(event) => changeStatus(lead, event.target.value as LeadStatus)}>{STATUSES.map((status) => <option key={status}>{status}</option>)}</select></label><Status status={lead.status} /></div>
+      <div className="drawer-hero">
+        <div><span>Státusz</span><Status status={lead.status} /></div>
+        <div><span>Prioritás</span><strong><i className={`priority ${lead.priority.toLowerCase()}`} />{lead.priority}</strong></div>
+        <div><span>Becsült érték</span><strong>{money(lead.value)}</strong></div>
+        <div><span>Felelős</span><strong>{lead.owner || "Nincs kijelölve"}</strong></div>
+        <div><span>Következő lépés</span><strong>{lead.nextAction || "Nincs megadva"}</strong></div>
+        <div><span>Következő kapcsolat</span><strong>{huDate(lead.nextDate)}</strong></div>
+      </div>
+      <div className="drawer-quick-actions" aria-label="Gyors műveletek">
+        <a href={`tel:${lead.phone.replace(/\s/g, "")}`}>☎ Hívás</a>
+        <button onClick={() => scrollTo("drawer-note")}>＋ Jegyzet</button>
+        <button onClick={() => scrollTo("drawer-task-form")}>□ Feladat</button>
+        <button onClick={openCalendar}>▦ Időpont</button>
+        <button onClick={openOffers}>₣ {offers.length ? "Ajánlat megnyitása" : "Ajánlat készítése"}</button>
+        <button onClick={() => scrollTo("drawer-status")}>↻ Státusz</button>
+      </div>
+      {warnings.length > 0 && <div className="drawer-warnings" role="status"><strong>Figyelmet igényel</strong>{warnings.map((warning) => <p key={warning}>! {warning}</p>)}</div>}
+      <div className="drawer-status" id="drawer-status"><label><span>Státusz módosítása</span><select value={lead.status} onChange={(event) => changeStatus(lead, event.target.value as LeadStatus)}>{STATUSES.map((status) => <option key={status}>{status}</option>)}</select></label><Status status={lead.status} /></div>
       {lead.status === "Elvesztett" && <div className="loss-reason"><label><span>Elvesztési ok *</span><select value={lead.lossReason ?? ""} onChange={(event) => setLossReason(lead, event.target.value)}><option value="">Válasszon…</option>{LOSS_REASONS.map((reason) => <option key={reason}>{reason}</option>)}</select></label></div>}
       <div className="drawer-body">
         <section><h3>Kapcsolat</h3><div className="detail-grid"><div><span>Telefon</span><strong>{lead.phone || "Nincs megadva"}</strong></div><div><span>E-mail</span><strong>{lead.email || "Nincs megadva"}</strong></div><div><span>Kapcsolattartás</span><strong>{lead.contact || "Nincs megadva"}</strong></div><div><span>Hívható</span><strong>{lead.callTime || "Nincs megadva"}</strong></div><div><span>Utolsó kapcsolat</span><strong>{lead.lastContactAt ?? "Még nem történt"}</strong></div></div></section>
         <section><h3>Igény és ingatlan</h3><div className="detail-grid"><div><span>Ingatlan</span><strong>{lead.property || "Még nem ismert"}</strong></div><div><span>Alapterület</span><strong>{lead.area ? `${lead.area} m²` : "Nincs megadva"}</strong></div><div><span>Helyiségek</span><strong>{lead.rooms || "Nincs megadva"}</strong></div><div><span>Időzítés</span><strong>{lead.urgency || "Nincs megadva"}</strong></div><div className="wide"><span>Műszaki adatok</span><strong>{lead.technical || "Visszahíváskor pontosítandó"}</strong></div><div className="wide"><span>Leírás</span><strong>{lead.description || "Nincs megjegyzés"}</strong></div></div></section>
         <section><h3>Üzleti adatok</h3><div className="detail-grid"><div><span>Becsült érték</span><strong>{money(lead.value)}</strong></div><div><span>Prioritás</span><strong><i className={`priority ${lead.priority.toLowerCase()}`} />{lead.priority}</strong></div><div><span>Felelős</span><strong>{lead.owner}</strong></div><div><span>Forrás</span><strong>{lead.source}</strong></div><div><span>Ajánlat elküldve</span><strong>{lead.offerSentAt ?? "Még nem"}</strong></div><div><span>Válaszra vár</span><strong>{waitingDays === null ? "—" : `${waitingDays} napja`}</strong></div>{lead.lossReason && <div className="wide"><span>Elvesztési ok</span><strong>{lead.lossReason}</strong></div>}</div></section>
-        <section><h3>Aktív feladatok</h3>{tasks.length ? tasks.map((task) => <div className="drawer-task" key={task.id}><span className={`priority-label ${task.priority.toLowerCase()}`}><i className={`priority ${task.priority.toLowerCase()}`} />{task.priority}</span><span><strong>{task.type}</strong><small>{task.due}{task.time ? ` • ${task.time}` : ""} • {task.owner ?? "Bálint"}</small>{task.note && <small>{task.note}</small>}</span></div>) : <p className="muted">Nincs aktív feladat.</p>}</section>
-        <section><h3>Új következő feladat</h3><div className="task-form"><label><span>Feladat típusa *</span><select value={taskForm.type} onChange={(event) => setTaskForm((previous) => ({ ...previous, type: event.target.value }))}>{TASK_TYPES.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>Határidő *</span><input type="date" value={taskForm.due} onChange={(event) => setTaskForm((previous) => ({ ...previous, due: event.target.value }))} /></label><label><span>Időpont – opcionális</span><input type="time" value={taskForm.time} onChange={(event) => setTaskForm((previous) => ({ ...previous, time: event.target.value }))} /></label><label><span>Prioritás *</span><select value={taskForm.priority} onChange={(event) => setTaskForm((previous) => ({ ...previous, priority: event.target.value as Priority }))}>{["Magas", "Közepes", "Alacsony"].map((priority) => <option key={priority}>{priority}</option>)}</select></label><label><span>Felelős *</span><select value={taskForm.owner} onChange={(event) => setTaskForm((previous) => ({ ...previous, owner: event.target.value }))}>{["Bálint", "Dóra"].map((owner) => <option key={owner}>{owner}</option>)}</select></label><label className="wide"><span>Belső megjegyzés – opcionális</span><textarea value={taskForm.note} onChange={(event) => setTaskForm((previous) => ({ ...previous, note: event.target.value }))} /></label></div>{taskError && <p className="field-error" role="alert">{taskError}</p>}<button className="button-primary task-save" onClick={saveTask}>Feladat létrehozása</button></section>
-        <section><h3>Belső jegyzet</h3><div className="note-box"><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Új belső jegyzet…" /><button onClick={addNote}>Jegyzet mentése</button></div>{lead.notes.map((item, index) => <p className="saved-note" key={index}>{item}</p>)}</section>
-        <section><h3>Események</h3><div className="timeline">{lead.timeline.map((item, index) => <p key={index}><i /><span>{item}</span></p>)}</div></section>
+        <section><h3>Aktív feladatok</h3>{tasks.length ? tasks.map((task) => <div className="drawer-task" key={task.id}><span className={`priority-label ${task.priority.toLowerCase()}`}><i className={`priority ${task.priority.toLowerCase()}`} />{task.priority}</span><span><strong>{task.type}</strong><small>{huDate(task.due)}{task.time ? ` • ${task.time}` : ""} • {task.owner ?? "Bálint"}</small>{task.note && <small>{task.note}</small>}</span></div>) : <p className="muted">Nincs aktív feladat.</p>}</section>
+        <section id="drawer-task-form"><h3>Új következő feladat</h3><div className="task-form"><label><span>Feladat típusa *</span><select value={taskForm.type} onChange={(event) => setTaskForm((previous) => ({ ...previous, type: event.target.value }))}>{TASK_TYPES.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>Határidő *</span><input type="date" value={taskForm.due} onChange={(event) => setTaskForm((previous) => ({ ...previous, due: event.target.value }))} /></label><label><span>Időpont – opcionális</span><input type="time" value={taskForm.time} onChange={(event) => setTaskForm((previous) => ({ ...previous, time: event.target.value }))} /></label><label><span>Prioritás *</span><select value={taskForm.priority} onChange={(event) => setTaskForm((previous) => ({ ...previous, priority: event.target.value as Priority }))}>{["Magas", "Közepes", "Alacsony"].map((priority) => <option key={priority}>{priority}</option>)}</select></label><label><span>Felelős *</span><select value={taskForm.owner} onChange={(event) => setTaskForm((previous) => ({ ...previous, owner: event.target.value }))}>{["Bálint", "Dóra"].map((owner) => <option key={owner}>{owner}</option>)}</select></label><label className="wide"><span>Belső megjegyzés – opcionális</span><textarea value={taskForm.note} onChange={(event) => setTaskForm((previous) => ({ ...previous, note: event.target.value }))} /></label></div>{taskError && <p className="field-error" role="alert">{taskError}</p>}<button className="button-primary task-save" onClick={saveTask}>Feladat létrehozása</button></section>
+        <section id="drawer-note"><h3>Belső jegyzet</h3><div className="note-box"><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Új belső jegyzet…" /><button onClick={addNote}>Jegyzet mentése</button></div>{lead.notes.map((item, index) => <p className="saved-note" key={index}>{item}</p>)}</section>
+        <section><h3>Események</h3><div className="timeline">{timeline.map((item, index) => <p key={`${item}-${index}`}><i /><span>{item}</span></p>)}</div></section>
         <section className="privacy-actions"><h3>Adatkezelés</h3><p>Ez a művelet csak a fiktív demóadatokra vonatkozik.</p><button className="danger-button" onClick={() => deleteLead(lead)}>Ügyfél és kapcsolódó demóadatok törlése</button></section>
       </div>
     </aside>
