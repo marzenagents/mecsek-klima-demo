@@ -14,7 +14,18 @@ import {
   type Priority,
   type Task,
 } from "./demo-logic";
-import { createPilotDataAdapter, type DataMode, type PilotDataAdapter } from "./data-store";
+import {
+  createPilotDataAdapter,
+  PilotAuthRequiredError,
+  type DataMode,
+  type PilotDataAdapter,
+} from "./data-store";
+import {
+  getPilotSession,
+  requestPilotMagicLink,
+  signOutPilot,
+  type PilotAuthSession,
+} from "./pilot-auth";
 import {
   attentionSummary,
   calculateOfferTotals,
@@ -185,7 +196,7 @@ const DEFAULT_FORM = {
   service: "", city: "", zip: "", property: "", area: "", rooms: "", ownership: "",
   units: "", mode: "", existing: "", pipe: "", outdoor: "", heating: "", emitter: "",
   insulation: "", consumption: "", projectType: "", urgency: "", budget: "", description: "",
-  fileName: "", name: "", phone: "", email: "", contact: "", callTime: "", consent: false,
+  fileName: "", name: "", phone: "", email: "", contact: "", callTime: "", website: "", consent: false,
 };
 
 const DEFAULT_CALLBACK = {
@@ -195,6 +206,7 @@ const DEFAULT_CALLBACK = {
   city: "",
   callTime: "",
   note: "",
+  website: "",
   consent: false,
 };
 
@@ -260,6 +272,14 @@ export default function Home() {
   const [communications, setCommunications] = useState<CommunicationLog[]>([]);
   const [adapter] = useState<PilotDataAdapter>(() => createPilotDataAdapter());
   const [dataMode] = useState<DataMode>(() => adapter.mode);
+  const centralPilot = dataMode === "Supabase pilot";
+  const [authSession, setAuthSession] = useState<PilotAuthSession | null>(null);
+  const [authReady, setAuthReady] = useState(() => !centralPilot);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginStatus, setLoginStatus] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [demoRole, setDemoRole] = useState<"Tulajdonos" | "Munkatárs">("Tulajdonos");
   const [selected, setSelected] = useState<Lead | null>(null);
   const [lastLead, setLastLead] = useState<Lead | null>(null);
@@ -280,6 +300,26 @@ export default function Home() {
   const callbackTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
+    if (!centralPilot) return;
+    let active = true;
+    void getPilotSession()
+      .then((session) => {
+        if (active) {
+          setAuthSession(session);
+          if (session) setLoginOpen(false);
+        }
+      })
+      .finally(() => {
+        if (active) setAuthReady(true);
+      });
+    return () => { active = false; };
+  }, [centralPilot]);
+
+  useEffect(() => {
+    if (!authReady) return;
+    if (centralPilot && !authSession) {
+      return;
+    }
     let active = true;
     const defaults: PilotState = {
       leads: INITIAL_LEADS.map(migrateLead),
@@ -299,8 +339,10 @@ export default function Home() {
         setCompany(state.company);
         setCommunications(state.communications);
       })
-      .catch(() => {
-        if (active) setToast("A mentett pilotadatokat nem sikerült betölteni, ezért a demóadatok jelennek meg.");
+      .catch((error) => {
+        if (!active) return;
+        if (error instanceof PilotAuthRequiredError) setLoginOpen(true);
+        else setToast("A mentett pilotadatokat nem sikerült betölteni, ezért a demóadatok jelennek meg.");
       })
       .finally(() => {
         if (active) setLoaded(true);
@@ -308,10 +350,11 @@ export default function Home() {
     return () => {
       active = false;
     };
-  }, [adapter]);
+  }, [adapter, authReady, authSession, centralPilot]);
 
   useEffect(() => {
     if (!loaded) return;
+    if (centralPilot && !authSession) return;
     const timer = window.setTimeout(() => {
       const state: PilotState = { leads, tasks, offers, calendar, company, communications };
       void adapter.save(state).catch(() => {
@@ -319,11 +362,38 @@ export default function Home() {
       });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [leads, tasks, offers, calendar, company, communications, loaded, adapter]);
+  }, [leads, tasks, offers, calendar, company, communications, loaded, adapter, centralPilot, authSession]);
 
   const showToast = (message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
+  };
+
+  const sendMagicLink = async () => {
+    const email = loginEmail.trim();
+    if (!isValidEmail(email)) {
+      setLoginStatus("Adj meg egy érvényes e-mail-címet.");
+      return;
+    }
+    setLoginBusy(true);
+    setLoginStatus("");
+    try {
+      await requestPilotMagicLink(email);
+      setLoginStatus("Elküldtük a belépési linket. Nyisd meg ezen az eszközön az e-mailből.");
+    } catch (error) {
+      setLoginStatus(error instanceof Error ? error.message : "A belépési e-mail küldése sikertelen.");
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    await signOutPilot();
+    setAuthSession(null);
+    setMode("public");
+    setPublicView("home");
+    window.history.replaceState(null, "", window.location.pathname);
+    showToast("Sikeresen kijelentkeztél a központi pilotból.");
   };
 
   const applyDashboardFilter = useCallback((filter: DashboardFilter) => {
@@ -347,10 +417,26 @@ export default function Home() {
     else window.history.pushState({ target, filter }, "", hash);
   }, [applyDashboardFilter]);
 
+  const openDashboard = useCallback((target: DashboardSection, filter: DashboardFilter = null) => {
+    if (centralPilot && !authSession) {
+      setLoginStatus("");
+      setLoginOpen(true);
+      return;
+    }
+    navigateDashboard(target, filter);
+  }, [authSession, centralPilot, navigateDashboard]);
+
   useEffect(() => {
     const syncFromHistory = () => {
       const parsed = parseDashboardHash(window.location.hash);
       if (!parsed) return;
+      if (centralPilot && authReady && !authSession) {
+        setMode("public");
+        setPublicView("home");
+        setLoginOpen(true);
+        window.history.replaceState(null, "", window.location.pathname);
+        return;
+      }
       setMode("dashboard");
       setSection(parsed.section);
       applyDashboardFilter(parsed.filter);
@@ -362,7 +448,7 @@ export default function Home() {
       window.removeEventListener("popstate", syncFromHistory);
       window.removeEventListener("hashchange", syncFromHistory);
     };
-  }, [applyDashboardFilter]);
+  }, [applyDashboardFilter, authReady, authSession, centralPilot]);
 
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -408,15 +494,17 @@ export default function Home() {
     }
     setFormErrors({});
     if (step < 5) setStep((value) => value + 1);
-    else submitLead();
+    else void submitLead();
   };
 
-  const submitLead = () => {
-    const id = nextLeadId(leads);
+  const submitLead = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    let id = nextLeadId(leads);
     const technical = heatPump
       ? [form.heating, form.emitter, form.insulation && `${form.insulation} szigetelés`, form.projectType].filter(Boolean).join(" • ")
       : [form.units && `${form.units} készülék`, form.mode, form.existing && `meglévő: ${form.existing}`, form.outdoor && `kültéri hely: ${form.outdoor}`].filter(Boolean).join(" • ");
-    const lead: Lead = {
+    let lead: Lead = {
       id, name: form.name, phone: form.phone, email: form.email, city: form.city, zip: form.zip,
       service: form.service, property: form.property, area: form.area, rooms: form.rooms,
       ownership: form.ownership, urgency: form.urgency, budget: form.budget, description: form.description,
@@ -427,6 +515,14 @@ export default function Home() {
       lastContactAt: today(),
       timeline: [`${today()} • Automatikus visszaigazolás előkészítve`, `${today()} • Érdeklődés rögzítve`],
     };
+    try {
+      id = await adapter.submitIntake(lead, form.website);
+      lead = { ...lead, id };
+    } catch (error) {
+      setSubmitting(false);
+      showToast(error instanceof Error ? error.message : "Az ajánlatkérés rögzítése sikertelen.");
+      return;
+    }
     setLeads((prev) => [lead, ...prev]);
     setTasks((prev) => [{ id: `T-${Date.now()}`, leadId: id, type: "Visszahívás", due: addDays(1), priority: lead.priority, owner: "Bálint", done: false }, ...prev]);
     setCommunications((prev) => [
@@ -454,6 +550,7 @@ export default function Home() {
     setForm(DEFAULT_FORM);
     setFormErrors({});
     setPublicView("success");
+    setSubmitting(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -463,6 +560,7 @@ export default function Home() {
   };
 
   const submitCallback = (demo = false) => {
+    if (submitting && !demo) return false;
     const errors: Record<string, string> = {};
     ["name", "phone", "service", "city", "callTime"].forEach((key) => {
       if (!String(callbackForm[key as keyof typeof callbackForm] ?? "").trim()) errors[key] = "Ez a mező kötelező.";
@@ -516,20 +614,38 @@ export default function Home() {
       note: callbackForm.note,
       done: false,
     };
-    setLeads((prev) => [lead, ...prev]);
-    setTasks((prev) => [task, ...prev]);
-    setCommunications((prev) => [{
-      id: `MSG-${Date.now()}-callback`,
-      leadId: id,
-      kind: "Új érdeklődő",
-      subject: `Új visszahívási igény: ${lead.name}`,
-      body: company.templates.ownerNotification.replace("[Név]", lead.name).replace("[Szolgáltatás]", lead.service),
-      createdAt: new Date().toISOString(),
-      mode: "Demó előnézet",
-    }, ...prev]);
-    setCallbackLead(lead);
-    setCallbackErrors({});
-    showToast(`A visszahívási igény rögzítve: ${id}`);
+    const storeCallbackLead = (storedLead: Lead) => {
+      const storedTask = {
+        ...task,
+        id: `T-${storedLead.id}-callback`,
+        leadId: storedLead.id,
+      };
+      setLeads((prev) => [storedLead, ...prev]);
+      setTasks((prev) => [storedTask, ...prev]);
+      setCommunications((prev) => [{
+        id: `MSG-${Date.now()}-callback`,
+        leadId: storedLead.id,
+        kind: "Új érdeklődő",
+        subject: `Új visszahívási igény: ${storedLead.name}`,
+        body: company.templates.ownerNotification.replace("[Név]", storedLead.name).replace("[Szolgáltatás]", storedLead.service),
+        createdAt: new Date().toISOString(),
+        mode: "Demó előnézet",
+      }, ...prev]);
+      setCallbackLead(storedLead);
+      setCallbackErrors({});
+      showToast(`A visszahívási igény rögzítve: ${storedLead.id}`);
+    };
+    if (centralPilot && !demo) {
+      setSubmitting(true);
+      void adapter.submitIntake(lead, callbackForm.website)
+        .then((storedId) => storeCallbackLead({ ...lead, id: storedId }))
+        .catch((error) => {
+          showToast(error instanceof Error ? error.message : "A visszahívási igény rögzítése sikertelen.");
+        })
+        .finally(() => setSubmitting(false));
+      return true;
+    }
+    storeCallbackLead(lead);
     return true;
   };
 
@@ -749,30 +865,46 @@ export default function Home() {
 
   const deleteLead = (lead: Lead) => {
     if (!window.confirm(`Biztosan törlöd ezt a fiktív ügyfelet: ${lead.name}?`)) return;
-    setLeads((previous) => previous.filter((item) => item.id !== lead.id));
-    setTasks((previous) => previous.filter((item) => item.leadId !== lead.id));
-    setOffers((previous) => previous.filter((item) => item.leadId !== lead.id));
-    setCalendar((previous) => previous.filter((item) => item.leadId !== lead.id));
-    setCommunications((previous) => previous.filter((item) => item.leadId !== lead.id));
-    setSelected(null);
-    showToast("A fiktív ügyfélhez tartozó adatok törölve.");
+    const removeFromInterface = () => {
+      setLeads((previous) => previous.filter((item) => item.id !== lead.id));
+      setTasks((previous) => previous.filter((item) => item.leadId !== lead.id));
+      setOffers((previous) => previous.filter((item) => item.leadId !== lead.id));
+      setCalendar((previous) => previous.filter((item) => item.leadId !== lead.id));
+      setCommunications((previous) => previous.filter((item) => item.leadId !== lead.id));
+      setSelected(null);
+      showToast(centralPilot ? "Az ügyfélhez tartozó pilotadatok törölve." : "A fiktív ügyfélhez tartozó adatok törölve.");
+    };
+    if (centralPilot) {
+      void adapter.removeIntake(lead.id)
+        .then(removeFromInterface)
+        .catch((error) => showToast(error instanceof Error ? error.message : "A központi ügyfél törlése sikertelen."));
+      return;
+    }
+    removeFromInterface();
   };
 
   const resetDemo = () => {
-    if (!window.confirm("Biztosan visszaállítod az eredeti fiktív demóadatokat?")) return;
-    setLeads(INITIAL_LEADS.map(migrateLead));
-    setTasks(INITIAL_TASKS.map(migrateTask));
-    setOffers(INITIAL_OFFERS);
-    setCalendar(INITIAL_CALENDAR);
-    setCompany(DEFAULT_COMPANY);
-    setCommunications([]);
-    setSelected(null);
-    setDashboardFilter(null);
-    void adapter.clear();
-    setCallbackLead(null);
-    setCallbackForm(DEFAULT_CALLBACK);
-    setForm(DEFAULT_FORM);
-    showToast("A demóadatok alaphelyzetbe álltak.");
+    const question = centralPilot
+      ? "Biztosan törlöd a munkaterület összes központi pilotadatát?"
+      : "Biztosan visszaállítod az eredeti fiktív demóadatokat?";
+    if (!window.confirm(question)) return;
+    const applyReset = () => {
+      setLeads(centralPilot ? [] : INITIAL_LEADS.map(migrateLead));
+      setTasks(centralPilot ? [] : INITIAL_TASKS.map(migrateTask));
+      setOffers(centralPilot ? [] : INITIAL_OFFERS);
+      setCalendar(centralPilot ? [] : INITIAL_CALENDAR);
+      setCompany(DEFAULT_COMPANY);
+      setCommunications([]);
+      setSelected(null);
+      setDashboardFilter(null);
+      setCallbackLead(null);
+      setCallbackForm(DEFAULT_CALLBACK);
+      setForm(DEFAULT_FORM);
+      showToast(centralPilot ? "A központi pilotadatok törölve." : "A demóadatok alaphelyzetbe álltak.");
+    };
+    void adapter.clear()
+      .then(applyReset)
+      .catch((error) => showToast(error instanceof Error ? error.message : "Az alaphelyzetbe állítás sikertelen."));
   };
 
   const startTour = () => {
@@ -890,7 +1022,7 @@ export default function Home() {
             <nav>
               <a href="#szolgaltatasok">Szolgáltatások</a>
               <a href="#folyamat">Hogyan működik?</a>
-              <button className="nav-dashboard" onClick={() => navigateDashboard("Áttekintés")}>Demó kezelőfelület</button>
+              <button className="nav-dashboard" onClick={() => openDashboard("Áttekintés")}>{centralPilot ? "Pilot kezelőfelület" : "Demó kezelőfelület"}</button>
             </nav>
           </header>
           {publicView === "home" && <PublicHome
@@ -899,10 +1031,10 @@ export default function Home() {
             callbackTriggerRef={callbackTriggerRef}
           />}
           {publicView === "form" && (
-            <QuoteForm form={form} updateForm={updateForm} errors={formErrors} step={step} setStep={setStep} nextStep={nextStep} heatPump={heatPump} onCancel={() => setPublicView("home")} />
+            <QuoteForm form={form} updateForm={updateForm} errors={formErrors} step={step} setStep={setStep} nextStep={nextStep} heatPump={heatPump} onCancel={() => setPublicView("home")} submitting={submitting} centralPilot={centralPilot} />
           )}
           {publicView === "success" && lastLead && (
-            <Success lead={lastLead} onBooking={() => setBooking(true)} onDashboard={() => { navigateDashboard("Érdeklődők"); setSelected(lastLead); }} />
+            <Success lead={lastLead} onBooking={() => setBooking(true)} onDashboard={() => { openDashboard("Érdeklődők"); if (!centralPilot || authSession) setSelected(lastLead); }} />
           )}
         </>
       ) : (
@@ -918,6 +1050,7 @@ export default function Home() {
           communications={communications} setMessagePreview={setMessagePreview} dataMode={dataMode}
           exportPilotData={exportPilotData} showToast={showToast} addQuickNote={addQuickNote}
           demoRole={demoRole} setDemoRole={setDemoRole} changeStatus={changeStatus} loaded={loaded}
+          authEmail={authSession?.user?.email ?? null} onSignOut={centralPilot ? logout : null}
         />
       )}
       {selected && (
@@ -932,6 +1065,16 @@ export default function Home() {
           openOffers={() => { setSelected(null); navigateDashboard("Ajánlatok"); }} />
       )}
       {booking && <Booking close={() => setBooking(false)} confirm={() => { setBooking(false); showToast("A demó időpontfoglalás rögzítve."); }} />}
+      {loginOpen && centralPilot && (
+        <PilotLoginModal
+          email={loginEmail}
+          setEmail={setLoginEmail}
+          status={loginStatus}
+          busy={loginBusy}
+          submit={sendMagicLink}
+          close={() => setLoginOpen(false)}
+        />
+      )}
       {callbackOpen && <CallbackModal
         form={callbackForm}
         setForm={setCallbackForm}
@@ -940,10 +1083,12 @@ export default function Home() {
         lead={callbackLead}
         close={closeCallback}
         submit={() => submitCallback(false)}
+        submitting={submitting}
+        centralPilot={centralPilot}
         openDashboard={() => {
           setCallbackOpen(false);
-          navigateDashboard("Érdeklődők");
-          if (callbackLead) setSelected(callbackLead);
+          openDashboard("Érdeklődők");
+          if (callbackLead && (!centralPilot || authSession)) setSelected(callbackLead);
         }}
       />}
       {messagePreview && (
@@ -1027,10 +1172,11 @@ function PublicHome({ onQuote, onCallback, callbackTriggerRef }: {
   );
 }
 
-function QuoteForm({ form, updateForm, errors, step, setStep, nextStep, heatPump, onCancel }: {
+function QuoteForm({ form, updateForm, errors, step, setStep, nextStep, heatPump, onCancel, submitting, centralPilot }: {
   form: typeof DEFAULT_FORM; updateForm: (field: string, value: string | boolean) => void;
   errors: Record<string, string>;
   step: number; setStep: (value: number) => void; nextStep: () => void; heatPump: boolean; onCancel: () => void;
+  submitting: boolean; centralPilot: boolean;
 }) {
   const input = (label: string, field: keyof typeof DEFAULT_FORM, type = "text", placeholder = "") => (
     <label><span>{label}</span><input id={`field-${field}`} aria-invalid={Boolean(errors[field])} aria-describedby={errors[field] ? `error-${field}` : undefined} type={type} value={String(form[field])} placeholder={placeholder} onChange={(e) => updateForm(field, e.target.value)} />{errors[field] && <small className="field-error" id={`error-${field}`}>{errors[field]}</small>}</label>
@@ -1047,14 +1193,14 @@ function QuoteForm({ form, updateForm, errors, step, setStep, nextStep, heatPump
         {step === 2 && <div className="form-step"><h2>Az ingatlan adatai</h2><p>Az alapadatok segítenek a megfelelő kapacitás előzetes felmérésében.</p><div className="field-grid">{input("Település *", "city", "text", "Pécs")}{input("Irányítószám *", "zip", "text", "7621")}{select("Ingatlan típusa *", "property", ["Családi ház", "Lakás", "Iroda", "Üzlethelyiség", "Egyéb"])}{input("Alapterület (m²) – opcionális", "area", "number", "90")}{input("Érintett helyiségek száma – opcionális", "rooms", "number", "3")}{select("Tulajdonviszony – opcionális", "ownership", ["Saját tulajdon", "Bérelt ingatlan"])}</div></div>}
         {step === 3 && <div className="form-step"><h2>Műszaki alapadatok</h2><p>Ha valamiben bizonytalan, nyugodtan hagyja üresen; visszahíváskor pontosítjuk.</p><div className="field-grid">{heatPump ? <>{select("Jelenlegi fűtési rendszer – opcionális", "heating", ["Gázkazán", "Vegyes tüzelés", "Elektromos fűtés", "Nincs még rendszer", "Egyéb"])}{select("Hőleadás – opcionális", "emitter", ["Radiátor", "Padlófűtés", "Mindkettő", "Még nem ismert"])}{select("Szigetelés állapota – opcionális", "insulation", ["Jó", "Közepes", "Gyenge", "Még nem ismert"])}{input("Éves energiafogyasztás – opcionális", "consumption", "text", "Ha ismert")}{select("Projekt típusa – opcionális", "projectType", ["Új építés", "Korszerűsítés"])}</> : <>{input("Készülékek száma – opcionális", "units", "number", "1")}{select("Használat – opcionális", "mode", ["Hűtés", "Fűtés", "Mindkettő"])}{select("Van meglévő készülék? – opcionális", "existing", ["Igen", "Nem"])}{input("Becsült csövezési hossz – opcionális", "pipe", "text", "például 4 méter")}{select("Van megfelelő kültériegység-hely? – opcionális", "outdoor", ["Igen", "Nem", "Nem tudom"])}</>}</div></div>}
         {step === 4 && <div className="form-step"><h2>Időzítés és keret</h2><p>Ezek az adatok nem jelentenek kötelezettségvállalást.</p><div className="field-grid">{select("Mikor szeretné a munkát? *", "urgency", ["Amint lehetséges", "1 hónapon belül", "1–3 hónapon belül", "Csak tájékozódom"])}{select("Tervezett költségkeret – opcionális", "budget", ["300 000 Ft alatt", "300 000–600 000 Ft", "600 000–1 500 000 Ft", "1 500 000 Ft felett", "Még nem tudom"])}<label className="full"><span>Rövid leírás – opcionális</span><textarea value={form.description} placeholder="Írja le röviden az igényét…" onChange={(e) => updateForm("description", e.target.value)} /></label><label className="full file"><span>Opcionális képfeltöltés</span><input type="file" accept="image/*" onChange={(e) => updateForm("fileName", e.target.files?.[0]?.name || "")} /><small>{form.fileName || "A demó csak a fájl nevét jegyzi meg, feltöltés nem történik."}</small></label></div></div>}
-        {step === 5 && <div className="form-step"><h2>Hogyan érhetjük el?</h2><p>Az elérhetőségeket kizárólag a demófolyamat szemléltetésére használjuk ezen az eszközön.</p><div className="field-grid">{input("Név *", "name", "text", "Minta Márton")}{input("Telefonszám *", "phone", "tel", "+36 30 123 4567")}{input("E-mail-cím *", "email", "email", "minta@example.hu")}{select("Kapcsolattartás módja *", "contact", ["Telefon", "E-mail"])}{select("Mikor hívható? *", "callTime", ["Délelőtt", "Délután", "Este", "Bármikor"])}<label className="consent full"><input id="field-consent" aria-invalid={Boolean(errors.consent)} aria-describedby={errors.consent ? "error-consent" : undefined} type="checkbox" checked={form.consent} onChange={(e) => updateForm("consent", e.target.checked)} /><span>Elolvastam az <button type="button" onClick={() => alert("Demó szöveg: éles rendszerhez jogilag ellenőrzött adatkezelési tájékoztató szükséges.")}>adatkezelési tájékoztatót</button>, és kérem, hogy a megadott elérhetőségeimen kapcsolatba lépjenek velem az ajánlatkérésem kezelése érdekében.</span></label>{errors.consent && <small className="field-error full" id="error-consent">{errors.consent}</small>}<div className="demo-legal full">Ez demó szöveg, nem kész jogi dokumentum. A beküldött tesztadatok kizárólag ebben a böngészőben maradnak.</div></div></div>}
-        <div className="form-actions">{step > 1 && <button className="button-secondary" onClick={() => setStep(step - 1)}>Vissza</button>}<button className="button-primary" onClick={nextStep}>{step === 5 ? "Ajánlatkérés elküldése" : "Tovább"} →</button></div>
+        {step === 5 && <div className="form-step"><h2>Hogyan érhetjük el?</h2><p>{centralPilot ? "A megadott adatokat az ajánlatkérés kezelése és a kapcsolatfelvétel érdekében rögzítjük." : "Az elérhetőségeket kizárólag a demófolyamat szemléltetésére használjuk ezen az eszközön."}</p><div className="field-grid">{input("Név *", "name", "text", "Minta Márton")}{input("Telefonszám *", "phone", "tel", "+36 30 123 4567")}{input("E-mail-cím *", "email", "email", "minta@example.hu")}{select("Kapcsolattartás módja *", "contact", ["Telefon", "E-mail"])}{select("Mikor hívható? *", "callTime", ["Délelőtt", "Délután", "Este", "Bármikor"])}<label className="honeypot-field" aria-hidden="true">Weboldal<input tabIndex={-1} autoComplete="off" value={form.website} onChange={(e) => updateForm("website", e.target.value)} /></label><label className="consent full"><input id="field-consent" aria-invalid={Boolean(errors.consent)} aria-describedby={errors.consent ? "error-consent" : undefined} type="checkbox" checked={form.consent} onChange={(e) => updateForm("consent", e.target.checked)} /><span>Elolvastam az <button type="button" onClick={() => alert("Demó szöveg: éles rendszerhez jogilag ellenőrzött adatkezelési tájékoztató szükséges.")}>adatkezelési tájékoztatót</button>, és kérem, hogy a megadott elérhetőségeimen kapcsolatba lépjenek velem az ajánlatkérésem kezelése érdekében.</span></label>{errors.consent && <small className="field-error full" id="error-consent">{errors.consent}</small>}<div className="demo-legal full">{centralPilot ? "Pilot mód: az adatok a vállalkozás elkülönített munkaterületére kerülnek. Az adatkezelési szöveget éles indulás előtt jogásszal ellenőriztetni kell." : "Ez demó szöveg, nem kész jogi dokumentum. A beküldött tesztadatok kizárólag ebben a böngészőben maradnak."}</div></div></div>}
+        <div className="form-actions">{step > 1 && <button className="button-secondary" onClick={() => setStep(step - 1)} disabled={submitting}>Vissza</button>}<button className="button-primary" onClick={nextStep} disabled={submitting}>{submitting ? "Rögzítés…" : step === 5 ? "Ajánlatkérés elküldése" : "Tovább"} →</button></div>
       </div>
     </section>
   );
 }
 
-function CallbackModal({ form, setForm, errors, setErrors, lead, close, submit, openDashboard }: {
+function CallbackModal({ form, setForm, errors, setErrors, lead, close, submit, openDashboard, submitting, centralPilot }: {
   form: typeof DEFAULT_CALLBACK;
   setForm: React.Dispatch<React.SetStateAction<typeof DEFAULT_CALLBACK>>;
   errors: Record<string, string>;
@@ -1063,6 +1209,8 @@ function CallbackModal({ form, setForm, errors, setErrors, lead, close, submit, 
   close: () => void;
   submit: () => boolean;
   openDashboard: () => void;
+  submitting: boolean;
+  centralPilot: boolean;
 }) {
   const modalRef = useRef<HTMLDivElement | null>(null);
   const firstFieldRef = useRef<HTMLInputElement | null>(null);
@@ -1124,13 +1272,14 @@ function CallbackModal({ form, setForm, errors, setErrors, lead, close, submit, 
           <label><span>Telefonszám *</span><input id="callback-phone" type="tel" aria-invalid={Boolean(errors.phone)} aria-describedby={errors.phone ? "callback-error-phone" : undefined} value={form.phone} placeholder="+36 30 123 4567" onChange={(event) => update("phone", event.target.value)} />{error("phone")}</label>
           <label><span>Szolgáltatás *</span><select id="callback-service" aria-invalid={Boolean(errors.service)} aria-describedby={errors.service ? "callback-error-service" : undefined} value={form.service} onChange={(event) => update("service", event.target.value)}><option value="">Válasszon…</option>{SERVICES.map((service) => <option key={service}>{service}</option>)}</select>{error("service")}</label>
           <label><span>Település *</span><input id="callback-city" aria-invalid={Boolean(errors.city)} aria-describedby={errors.city ? "callback-error-city" : undefined} value={form.city} placeholder="Pécs" onChange={(event) => update("city", event.target.value)} />{error("city")}</label>
+          <label className="honeypot-field" aria-hidden="true">Weboldal<input tabIndex={-1} autoComplete="off" value={form.website} onChange={(event) => update("website", event.target.value)} /></label>
           <label className="full"><span>Mikor hívható? *</span><select id="callback-callTime" aria-invalid={Boolean(errors.callTime)} aria-describedby={errors.callTime ? "callback-error-callTime" : undefined} value={form.callTime} onChange={(event) => update("callTime", event.target.value)}><option value="">Válasszon…</option>{["Délelőtt", "Délután", "Este", "Bármikor"].map((option) => <option key={option}>{option}</option>)}</select>{error("callTime")}</label>
           <label className="full"><span>Rövid megjegyzés – opcionális</span><textarea value={form.note} onChange={(event) => update("note", event.target.value)} placeholder="Például: két szobához szeretnék klímát." /></label>
           <label className="consent full"><input id="callback-consent" type="checkbox" aria-invalid={Boolean(errors.consent)} aria-describedby={errors.consent ? "callback-error-consent" : undefined} checked={form.consent} onChange={(event) => update("consent", event.target.checked)} /><span>Elolvastam a demó adatkezelési tájékoztatót, és kérem, hogy kapcsolatba lépjenek velem.</span></label>
           {errors.consent && <small className="field-error full" id="callback-error-consent">{errors.consent}</small>}
         </div>
-        <div className="demo-legal">Ez demó szöveg, nem kész jogi dokumentum. Valódi adatot ne adjon meg.</div>
-        <div className="modal-actions"><button className="button-secondary" onClick={close}>Mégsem</button><button className="button-primary" onClick={submit}>Visszahívást kérek</button></div>
+        <div className="demo-legal">{centralPilot ? "Pilot mód: az adatokat a kapcsolatfelvételhez rögzítjük. Az adatkezelési szöveg még jogi ellenőrzést igényel." : "Ez demó szöveg, nem kész jogi dokumentum. Valódi adatot ne adjon meg."}</div>
+        <div className="modal-actions"><button className="button-secondary" onClick={close} disabled={submitting}>Mégsem</button><button className="button-primary" onClick={submit} disabled={submitting}>{submitting ? "Rögzítés…" : "Visszahívást kérek"}</button></div>
       </>}
     </div>
   </div>;
@@ -1145,6 +1294,32 @@ function Success({ lead, onBooking, onDashboard }: { lead: Lead; onBooking: () =
       <div className="email-preview"><div><span>Automatikus e-mail előnézete</span><strong>Megkaptuk ajánlatkérését – Mecsek Klíma</strong></div><p>Kedves {lead.name}!</p><p>Köszönjük a megkeresést. Rögzítettük a(z) {lead.service.toLowerCase()} iránti érdeklődését.</p><p>Munkatársunk egy munkanapon belül áttekinti a megadott adatokat, majd a választott módon kapcsolatba lép Önnel.</p><p>Az érdeklődés azonosítója: <strong>{lead.id}</strong></p><small>Fontos: ez az üzenet nem minősül végleges árajánlatnak vagy visszaigazolt szerelési időpontnak.</small></div>
       <div className="success-actions"><button className="button-primary" onClick={onBooking}>15 perces telefonos egyeztetés foglalása</button><button className="button-secondary" onClick={onDashboard}>Megnézem a kezelőfelületen</button></div>
     </section>
+  );
+}
+
+function PilotLoginModal({ email, setEmail, status, busy, submit, close }: {
+  email: string;
+  setEmail: (value: string) => void;
+  status: string;
+  busy: boolean;
+  submit: () => Promise<void>;
+  close: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onMouseDown={close}>
+      <div className="pilot-login-modal" role="dialog" aria-modal="true" aria-labelledby="pilot-login-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="modal-close" aria-label="Belépés bezárása" onClick={close}>×</button>
+        <span className="eyebrow">Központi pilot</span>
+        <h2 id="pilot-login-title">Belépés a kezelőfelületre</h2>
+        <p>Jelszó helyett biztonságos, egyszer használható belépési linket küldünk a munkaterülethez engedélyezett e-mail-címre.</p>
+        <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+          <label><span>E-mail-cím</span><input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="nev@vallalkozas.hu" required /></label>
+          {status && <p className="pilot-login-status" role="status">{status}</p>}
+          <button className="button-primary full-button" type="submit" disabled={busy}>{busy ? "Küldés…" : "Belépési link küldése"}</button>
+        </form>
+        <small>Csak a munkaterülethez előzetesen hozzárendelt felhasználók férnek hozzá az ügyféladatokhoz.</small>
+      </div>
+    </div>
   );
 }
 
@@ -1188,6 +1363,8 @@ type DashboardProps = {
   setDemoRole: (role: "Tulajdonos" | "Munkatárs") => void;
   changeStatus: (lead: Lead, status: LeadStatus) => void;
   loaded: boolean;
+  authEmail: string | null;
+  onSignOut: (() => void) | null;
 };
 
 function Dashboard(props: DashboardProps) {
@@ -1209,16 +1386,23 @@ function Dashboard(props: DashboardProps) {
   return (
     <div className="dashboard-shell">
       <aside className="sidebar">
-        <div className="brand dark"><span className="brand-mark">M</span><span><strong>{props.company.name}</strong><small>Demó kezelőfelület</small></span></div>
+        <div className="brand dark"><span className="brand-mark">M</span><span><strong>{props.company.name}</strong><small>{props.authEmail ? "Pilot kezelőfelület" : "Demó kezelőfelület"}</small></span></div>
         <nav>{nav.map(([name, icon]) => (
           <button className={section === name ? "active" : ""} key={name} onClick={() => navigate(name)}>
             <span>{icon}</span>{name}{name === "Mai feladatok" && <i>{activeTasks.length}</i>}
           </button>
         ))}</nav>
-        <div className="sidebar-bottom"><button onClick={() => setMode("public")}>↗ Nyilvános oldal</button><small>{props.dataMode} • fiktív adatok</small></div>
+        <div className="sidebar-bottom"><button onClick={() => setMode("public")}>↗ Nyilvános oldal</button><small>{props.dataMode}{props.authEmail ? " • központi mentés" : " • fiktív adatok"}</small></div>
       </aside>
       <div className="dashboard-main">
-        <header className="dashboard-header"><div><span className="mobile-demo">Demó kezelőfelület</span><h1>{section}</h1><p>{section === "Áttekintés" ? "A mai nap legfontosabb ügyfélfolyamatai egy helyen." : "Minden megjelenített adat fiktív."}</p></div><div className="user-chip role-switch"><span>{props.demoRole === "Tulajdonos" ? "BM" : "DN"}</span><div><strong>{props.demoRole === "Tulajdonos" ? "Bálint Márk" : "Dóra Nagy"}</strong><select aria-label="Demó szerepkör" value={props.demoRole} onChange={(event) => { const role = event.target.value as "Tulajdonos" | "Munkatárs"; props.setDemoRole(role); if (role === "Munkatárs" && section === "Beállítások") navigate("Áttekintés"); }}><option>Tulajdonos</option><option>Munkatárs</option></select></div></div></header>
+        <header className="dashboard-header">
+          <div><span className="mobile-demo">{props.authEmail ? "Pilot kezelőfelület" : "Demó kezelőfelület"}</span><h1>{section}</h1><p>{section === "Áttekintés" ? "A mai nap legfontosabb ügyfélfolyamatai egy helyen." : props.authEmail ? "A munkaterület aktuális adatai." : "Minden megjelenített adat fiktív."}</p></div>
+          {props.authEmail ? (
+            <div className="user-chip authenticated-user"><span>{props.authEmail.slice(0, 1).toUpperCase()}</span><div><strong>{props.authEmail}</strong><button onClick={() => props.onSignOut?.()}>Kijelentkezés</button></div></div>
+          ) : (
+            <div className="user-chip role-switch"><span>{props.demoRole === "Tulajdonos" ? "BM" : "DN"}</span><div><strong>{props.demoRole === "Tulajdonos" ? "Bálint Márk" : "Dóra Nagy"}</strong><select aria-label="Demó szerepkör" value={props.demoRole} onChange={(event) => { const role = event.target.value as "Tulajdonos" | "Munkatárs"; props.setDemoRole(role); if (role === "Munkatárs" && section === "Beállítások") navigate("Áttekintés"); }}><option>Tulajdonos</option><option>Munkatárs</option></select></div></div>
+          )}
+        </header>
         {!props.loaded && <div className="dashboard-content"><div className="loading-state" role="status"><span /><strong>Demóadatok betöltése…</strong></div></div>}
         {props.loaded && section === "Áttekintés" && <Overview leads={leads} tasks={activeTasks} offers={props.offers} openLead={setSelected} navigate={navigate} />}
         {section === "Érdeklődők" && <LeadList {...props} />}
@@ -1654,7 +1838,7 @@ function Settings({ resetDemo, company, setCompany, communications, setMessagePr
     <section className="panel"><div className="panel-title"><div><h2>Céges megjelenés</h2><p>A módosítások a demóadatokkal együtt mentődnek.</p></div><span className="tag">{dataMode}</span></div><div className="settings-form"><label><span>Vállalkozás neve</span><input value={company.name} onChange={(event) => update("name", event.target.value)} /></label><label><span>Telefonszám</span><input value={company.phone} onChange={(event) => update("phone", event.target.value)} /></label><label><span>E-mail-cím</span><input type="email" value={company.email} onChange={(event) => update("email", event.target.value)} /></label><label><span>Szolgáltatási terület</span><input value={company.serviceArea} onChange={(event) => update("serviceArea", event.target.value)} /></label><label><span>Elsődleges szín</span><input type="color" value={company.primaryColor} onChange={(event) => update("primaryColor", event.target.value)} /></label><label><span>Ajánlat érvényessége (nap)</span><input type="number" min="1" value={company.offerValidityDays} onChange={(event) => update("offerValidityDays", Number(event.target.value))} /></label><label><span>Adatmegőrzés (nap)</span><input type="number" min="1" value={company.retentionDays} onChange={(event) => update("retentionDays", Number(event.target.value))} /></label><label className="wide"><span>Fizetési feltételek</span><textarea value={company.paymentTerms} onChange={(event) => update("paymentTerms", event.target.value)} /></label><label className="wide"><span>Munkatársak – vesszővel elválasztva</span><input value={company.team.join(", ")} onChange={(event) => update("team", event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} /></label></div></section>
     <section className="panel"><h2>Magyar üzenetsablonok</h2><p>Demómódban csak előnézet készül, valódi e-mail nem kerül kiküldésre.</p><div className="template-list"><label><span>Ajánlatkérés visszaigazolása</span><textarea value={company.templates.leadConfirmation} onChange={(event) => updateTemplate("leadConfirmation", event.target.value)} /></label><label><span>Új érdeklődő értesítés</span><textarea value={company.templates.ownerNotification} onChange={(event) => updateTemplate("ownerNotification", event.target.value)} /></label><label><span>Ajánlatküldő üzenet</span><textarea value={company.templates.offerEmail} onChange={(event) => updateTemplate("offerEmail", event.target.value)} /></label><label><span>Utánkövetés</span><textarea value={company.templates.followupEmail} onChange={(event) => updateTemplate("followupEmail", event.target.value)} /></label><label><span>Időpont-emlékeztető</span><textarea value={company.templates.appointmentReminder} onChange={(event) => updateTemplate("appointmentReminder", event.target.value)} /></label></div></section>
     <section className="panel"><div className="panel-title"><div><h2>Kommunikációs napló</h2><p>Az utolsó szimulált üzenetek előnézete.</p></div></div>{communications.length ? communications.slice(0, 6).map((message) => <button className="communication-row" key={message.id} onClick={() => setMessagePreview(message)}><span><strong>{message.subject}</strong><small>{message.kind} • {new Date(message.createdAt).toLocaleString("hu-HU")}</small></span><b>Előnézet →</b></button>) : <div className="empty-state small"><strong>Még nincs kommunikációs esemény</strong></div>}</section>
-    <section className="panel"><h2>Adatkezelési műveletek</h2><div className="setting-row"><div><strong>Demóadatok exportálása</strong><small>Letölti az érdeklődőket, feladatokat, ajánlatokat és időpontokat JSON-formátumban.</small></div><button onClick={exportPilotData}>Exportálás</button></div><div className="setting-row"><div><strong>Demóadatok visszaállítása</strong><small>Törli az ezen a munkaterületen végzett fiktív módosításokat.</small></div><button className="danger-button" onClick={resetDemo}>Alaphelyzet</button></div><div className="setting-row"><div><strong>Automatikus utánkövetés</strong><small>Ajánlat kiküldésekor deduplikált 3 és 7 napos feladat készül.</small></div><span className="toggle on">Bekapcsolva</span></div></section>
+    <section className="panel"><h2>Adatkezelési műveletek</h2><div className="setting-row"><div><strong>{dataMode === "Supabase pilot" ? "Pilotadatok exportálása" : "Demóadatok exportálása"}</strong><small>Letölti az érdeklődőket, feladatokat, ajánlatokat és időpontokat JSON-formátumban.</small></div><button onClick={exportPilotData}>Exportálás</button></div><div className="setting-row"><div><strong>{dataMode === "Supabase pilot" ? "Központi pilotadatok törlése" : "Demóadatok visszaállítása"}</strong><small>{dataMode === "Supabase pilot" ? "Véglegesen üríti ezt a munkaterületet; csak tulajdonosi jogosultsággal működik." : "Törli az ezen a munkaterületen végzett fiktív módosításokat."}</small></div><button className="danger-button" onClick={resetDemo}>{dataMode === "Supabase pilot" ? "Pilot ürítése" : "Alaphelyzet"}</button></div><div className="setting-row"><div><strong>Automatikus utánkövetés</strong><small>Ajánlat kiküldésekor deduplikált 3 és 7 napos feladat készül.</small></div><span className="toggle on">Bekapcsolva</span></div></section>
     <section className="panel legal-panel"><h2>Adatvédelmi figyelmeztetés</h2><p>Ez demó szöveg, nem jogász által ellenőrzött vagy kész jogi dokumentum. Éles rendszerhez hozzáférés-szabályozás, mentés, naplózás, spamvédelem és jogilag ellenőrzött adatkezelési tájékoztató szükséges.</p><p>A pilot adatmodell támogatja az exportot, ügyfelenkénti törlést, eseményidővonalat és beállítható megőrzési időt.</p></section>
   </div>;
 }

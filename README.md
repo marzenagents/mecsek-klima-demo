@@ -20,6 +20,8 @@ Magyar nyelvű, mobilbarát webalkalmazás-demó klíma- és hőszivattyú-szere
 - dinamikus értékesítési és területi kimutatások;
 - szerkeszthető céges adatok és magyar üzenetsablonok;
 - JSON-adatexport, ügyfelenkénti törlés és demó-visszaállítás.
+- opcionális, magic-linkes pilotbelépés és munkaterületenként elkülönített központi adatok;
+- nyilvános ajánlatkérések ütközésmentes központi fogadása és egyszerű botcsapda.
 
 ## Helyi indítás
 
@@ -53,9 +55,16 @@ npm test
 
 Ha nincs megadva környezeti változó, az alkalmazás automatikusan helyi demómódban indul. Az állapot az adott böngésző `localStorage` tárhelyén marad meg.
 
-### Supabase pilot-adapter
+### Supabase központi pilot
 
-A kliensben előkészített adapter a következő értékeket használja:
+Az opcionális központi mód magic-linkes Supabase Auth belépést, sor-szintű hozzáférés-ellenőrzést és munkaterületenként elkülönített adatokat használ. A nyilvános ajánlatkérés belépés nélkül működik, de kizárólag egy ellenőrzött adatbázis-függvényen keresztül írhat.
+
+Beállítás:
+
+1. Hozz létre egy külön Supabase pilotprojektet.
+2. Futtasd le a `docs/supabase-pilot.sql` fájlt a Supabase SQL Editorban.
+3. A fájl végén található mintával hozz létre egy munkaterületet, és másold ki a kapott UUID-t.
+4. Másold a `.env.example` fájlt `.env.local` néven, majd töltsd ki ezt a három értéket:
 
 ```text
 NEXT_PUBLIC_SUPABASE_URL
@@ -63,9 +72,10 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY
 NEXT_PUBLIC_DEMO_WORKSPACE_ID
 ```
 
-A minimális pilot tábla leírása: `docs/supabase-pilot.sql`.
+5. Indítsd újra a fejlesztői kiszolgálót, kérj magic-linkes belépést a kezelőfelületen, majd a létrejött Auth-felhasználót rendeld a munkaterülethez a SQL-fájl végén megadott paranccsal.
+6. A Supabase Auth URL-beállításainál add hozzá a helyi és a későbbi éles webcímet az engedélyezett átirányításokhoz.
 
-Fontos korlát: a Supabase-adapter csak megfelelően beállított Supabase Auth és sor-szintű hozzáférési szabályok mellett használható biztonságosan. Az anon kulcs nem titok, ezért önmagában nem jogosultságkezelés. Éles személyes adatot a demó-RLS ellenőrzése nélkül ne tölts fel.
+Ha bármelyik környezeti érték hiányzik, az alkalmazás biztonságosan visszaáll a változatlan helyi demómódra. Az anon kulcs nem titok; a védelmet a SQL-sémában lévő RLS-szabályok és a munkaterületi tagság adják. Éles személyes adat előtt külön Supabase projektben ellenőrizni kell a szabályokat.
 
 ## E-mail és külső naptár
 
@@ -73,12 +83,12 @@ A demó nem küld valódi e-mailt vagy SMS-t, és nem ír külső naptárba. A f
 
 ## Jogosultság és adatvédelem
 
-A privát telepítés hozzáférését a hostingplatform szabályozza. A kezelőfelület jelszó nélküli demómód, nem kész, alkalmazásszintű hitelesítési rendszer. Éles pilot előtt szükséges:
+Központi módban a kezelőfelület egyszer használható e-mailes belépési linket használ. A munkaterület adatait csak az ahhoz rendelt tulajdonos vagy munkatárs olvashatja; a törlést az adatbázis tulajdonosi szerepkörhöz köti. A helyi demómód továbbra is jelszó nélküli és kizárólag fiktív adatokhoz készült.
 
-- Supabase Auth vagy más támogatott hitelesítés;
-- tulajdonosi és munkatársi jogosultság szerveroldali ellenőrzése;
+Éles pilot előtt még szükséges:
+
 - jogász által ellenőrzött adatkezelési tájékoztató;
-- mentés, auditnapló, spamvédelem és fájlellenőrzés;
+- mentési/visszaállítási folyamat, auditnapló, erősebb spamvédelem és fájlellenőrzés;
 - normalizált ügyfél-, ajánlat- és eseménytáblák.
 
 ## Demóhasználat

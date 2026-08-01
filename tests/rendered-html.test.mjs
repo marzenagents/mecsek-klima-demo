@@ -28,11 +28,13 @@ test("a Mecsek Klíma oldal sikeresen kiszolgálható", async () => {
 });
 
 test("a projekt nem tartalmazza az ideiglenes kezdőnézetet", async () => {
-  const [page, layout, packageJson, dataStore] = await Promise.all([
+  const [page, layout, packageJson, dataStore, auth, pilotSql] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../app/data-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/pilot-auth.ts", import.meta.url), "utf8"),
+    readFile(new URL("../docs/supabase-pilot.sql", import.meta.url), "utf8"),
   ]);
   assert.match(page, /createPilotDataAdapter/);
   assert.match(page, /Ajánlat elküldve/);
@@ -47,6 +49,12 @@ test("a projekt nem tartalmazza az ideiglenes kezdőnézetet", async () => {
   assert.match(page, /WorkdayView/);
   assert.match(dataStore, /localStorage/);
   assert.match(dataStore, /SupabasePilotAdapter/);
+  assert.match(dataStore, /mecsek_submit_public_lead/);
+  assert.match(auth, /requestPilotMagicLink/);
+  assert.match(auth, /refresh_token/);
+  assert.match(pilotSql, /enable row level security/i);
+  assert.match(pilotSql, /mecsek_workspace_members/);
+  assert.match(pilotSql, /security definer/i);
   assert.match(layout, /lang="hu"/);
   assert.match(layout, /og\.png/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
